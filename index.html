@@ -1255,40 +1255,86 @@ function updateMenu(items, y0) {
     }
   }
 }
-/* ---- MODE SELECT screen: pick any mode from a list (name, rules, your best score) ---- */
+/* ---- MODE SELECT screen: a grid of icon tiles (3 per row); the highlighted tile shows its rules underneath ---- */
 let modeSel = 0;
-const MS_Y0 = 24, MS_RH = 20, MS_BACK = { x: 125, y: 161, w: 70, h: 13 };
+const MS = { cols: 3, x0: 17, y0: 24, w: 90, h: 54, gx: 8, gy: 6 };
+const MS_BACK = { x: 125, y: 163, w: 70, h: 13 };
+const msRect = i => ({ x: MS.x0 + (i % MS.cols) * (MS.w + MS.gx), y: MS.y0 + ((i / MS.cols) | 0) * (MS.h + MS.gy), w: MS.w, h: MS.h });
+const inRect = (p, r) => p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h;
 function openModes() { modeSel = modeIdx; S = 'modes'; mouseMoved = false; clicked = null; sfx('select'); }
 function startMode(i) { applyMode(i); save.modeId = mode().id; writeSave(); autopilot = false; sfx('select'); newRun(); }
 function updateModes() {
   const n = MODES.length;
-  const inRow = (p, i) => p.x >= 20 && p.x < 300 && p.y >= MS_Y0 + i * MS_RH && p.y < MS_Y0 + (i + 1) * MS_RH - 1;
-  const inBack = p => p.x >= MS_BACK.x && p.x < MS_BACK.x + MS_BACK.w && p.y >= MS_BACK.y && p.y < MS_BACK.y + MS_BACK.h;
-  if (mouseMoved) { mouseMoved = false; for (let i = 0; i < n; i++) if (inRow(mouse, i) && modeSel !== i) { modeSel = i; sfx('move'); } }
-  if (took('ArrowDown') || took('KeyS') || took('PadDown')) { modeSel = (modeSel + 1) % n; sfx('move'); }
-  if (took('ArrowUp') || took('KeyW') || took('PadUp')) { modeSel = (modeSel + n - 1) % n; sfx('move'); }
+  if (mouseMoved) { mouseMoved = false; for (let i = 0; i < n; i++) if (inRect(mouse, msRect(i)) && modeSel !== i) { modeSel = i; sfx('move'); } }
+  const mv = d => { const k = modeSel + d; if (k >= 0 && k < n) { modeSel = k; sfx('move'); } };
+  if (took('ArrowRight') || took('KeyD') || took('PadRight')) mv(1);
+  if (took('ArrowLeft') || took('KeyA') || took('PadLeft')) mv(-1);
+  if (took('ArrowDown') || took('KeyS') || took('PadDown')) mv(MS.cols);
+  if (took('ArrowUp') || took('KeyW') || took('PadUp')) mv(-MS.cols);
   if (took('Enter') || took('Space') || took('PadA')) { startMode(modeSel); return; }
   if (took('Escape') || took('Backspace') || took('PadB')) { S = 'title'; menuSel = 1; clicked = null; sfx('back'); return; }
   if (clicked) {
-    if (inBack(clicked)) { S = 'title'; menuSel = 1; clicked = null; sfx('back'); return; }
-    for (let i = 0; i < n; i++) if (inRow(clicked, i)) { modeSel = i; startMode(i); return; }
+    if (inRect(clicked, MS_BACK)) { S = 'title'; menuSel = 1; clicked = null; sfx('back'); return; }
+    for (let i = 0; i < n; i++) if (inRect(clicked, msRect(i))) { modeSel = i; startMode(i); return; }
   }
 }
+// pixel-art icons, drawn centred on (cx, cy) inside a 90x54 tile; t = animation time, on = tile highlighted
+const px = (x, y, w, h, c) => { g.fillStyle = c; g.fillRect(R(x), R(y), w, h); };
+const SKULL = ['..XXXXXXXX..', '.XXXXXXXXXX.', 'XXXXXXXXXXXX', 'XX..XXXX..XX', 'XX..XXXX..XX', 'XXXXXXXXXXXX', '.XXXX..XXXX.', '..XXXXXXXX..', '..X.X..X.X..'];
+const MODE_ICONS = {
+  classic(cx, cy, on, t) {                                 // a weapon snake wriggling past the swarm
+    for (let k = 0; k < 4; k++) px(cx - 30 + k * 20 + Math.sin(t * 2 + k) * 2, cy + 12 + Math.cos(t * 2 + k) * 3, 2, 2, COL.enemy);
+    for (let i = 5; i >= 0; i--) { const x = cx + 14 - i * 8, y = cy + Math.sin(t * 3 - i * 0.8) * (on ? 6 : 3); if (i === 0) gHead(x, y); else drawWeapon(i % 3 === 2 ? 'spike' : 'spitter', x, y); }
+    if (on && ((t * 4) | 0) % 2) px(cx + 24, cy - 1, 3, 2, '#D9FF8A');
+  },
+  rush(cx, cy, on, t) {                                    // a boss with a lightning bolt: fast and brutal
+    box(cx - 6, cy, 16, 16, COL.boss); px(cx - 11, cy - 4, 3, 3, COL.dark); px(cx - 4, cy - 4, 3, 3, COL.dark);
+    const f = on && ((t * 8) | 0) % 2 ? '#FFFFFF' : '#FFD84A';
+    for (const [x, y, w, h] of [[10, -14, 4, 5], [7, -10, 4, 5], [10, -6, 4, 5], [6, -2, 4, 5], [9, 2, 4, 5], [5, 6, 4, 4]]) px(cx + x + 8, cy + y, w, h, f);
+    textC('1:00', cx - 6, cy - 21, COL.dim, 1);
+  },
+  endless(cx, cy, on, t) {                                 // an infinity loop with a snake head racing round it
+    for (let k = 0; k < 48; k++) { const a = k / 48 * TAU, d = 1 + Math.sin(a) ** 2; px(cx + 22 * Math.cos(a) / d, cy + 22 * Math.sin(a) * Math.cos(a) / d, 2, 2, on ? '#6FF0FF' : '#4a8aa0'); }
+    for (let k = 0; k < 5; k++) { const a = t * 2.4 - k * 0.22, d = 1 + Math.sin(a) ** 2; px(cx + 22 * Math.cos(a) / d - 1, cy + 22 * Math.sin(a) * Math.cos(a) / d - 1, 4 - (k > 0 ? 1 : 0), 4 - (k > 0 ? 1 : 0), k ? '#B7F34A' : COL.head); }
+  },
+  duel(cx, cy, on, t) {                                    // one snake, two bosses, a laser at each
+    const bob = on ? Math.sin(t * 5) * 2 : 0;
+    box(cx - 24, cy - 8 + bob, 11, 11, COL.boss); box(cx + 24, cy - 8 - bob, 11, 11, COL.boss);
+    px(cx - 27, cy - 11 + bob, 2, 2, COL.dark); px(cx - 22, cy - 11 + bob, 2, 2, COL.dark); px(cx + 21, cy - 11 - bob, 2, 2, COL.dark); px(cx + 26, cy - 11 - bob, 2, 2, COL.dark);
+    gHead(cx, cy + 8);
+    const col = on && ((t * 6) | 0) % 2 ? '#FFFFFF' : '#6FF0FF';
+    for (const sx of [-1, 1]) for (let k = 1; k < 8; k++) px(cx + sx * k * 2.9, cy + 8 - k * 2.3, 2, 2, col);
+  },
+  hunt(cx, cy, on, t) {                                    // a red rival snake in the crosshairs
+    for (let i = 5; i >= 0; i--) { const x = cx + 16 - i * 7, y = cy + Math.sin(t * 2.5 - i * 0.9) * 5; box(x, y, i ? 5 : 8, i ? 5 : 8, i ? COL.rival : COL.rivalHead); }
+    const hx = cx + 16, hy = cy + Math.sin(t * 2.5) * 5, r = on ? 9 + Math.sin(t * 6) * 1.5 : 9;
+    ring(hx, hy, r, COL.orange);
+    for (const [dx, dy, w, h] of [[-r - 4, 0, 4, 1], [r + 1, 0, 4, 1], [0, -r - 4, 1, 4], [0, r + 1, 1, 4]]) px(hx + dx, hy + dy, w, h, COL.orange);
+  },
+  hard(cx, cy, on, t) {                                    // a skull
+    const gl = on && ((t * 6) | 0) % 2 ? '#FF6A4A' : COL.dark;
+    for (let r = 0; r < SKULL.length; r++) for (let c = 0; c < 12; c++) if (SKULL[r][c] === 'X') px(cx - 12 + c * 2, cy - 11 + r * 2, 2, 2, '#E8ECF5');
+    for (const [c, r] of [[2, 3], [3, 3], [2, 4], [3, 4], [8, 3], [9, 3], [8, 4], [9, 4]]) px(cx - 12 + c * 2, cy - 11 + r * 2, 2, 2, gl);
+  },
+};
 function drawModes() {
   g.setTransform(1, 0, 0, 1, 0, 0);
   drawFloor(AW / 2, AH / 2); dim(0.6);
   textC('SELECT MODE', VW / 2, 5, COL.head, 2);
   for (let i = 0; i < MODES.length; i++) {
-    const m = MODES[i], y = MS_Y0 + i * MS_RH, on = i === modeSel;
-    if (on) { g.fillStyle = COL.dark; g.fillRect(19, y - 1, 282, MS_RH - 1); g.fillStyle = '#2c3348'; g.fillRect(20, y, 280, MS_RH - 3); g.fillStyle = COL.head; g.fillRect(20, y, 2, MS_RH - 3); }
-    else { g.fillStyle = 'rgba(31,36,51,0.7)'; g.fillRect(20, y, 280, MS_RH - 3); }
-    text(m.name, 28, y + 3, on ? COL.head : COL.ui, 1);
-    if (i === modeIdx) text('LAST PLAYED', 28 + textW(m.name, 1) + 6, y + 3, COL.dim, 1);
-    const b = 'BEST ' + (save.best[m.id] || 0); text(b, 294 - textW(b, 1), y + 3, (save.best[m.id] || 0) ? COL.orb : COL.dim, 1);
-    text(m.desc, 28, y + 11, on ? COL.orange : COL.dim, 1);
+    const m = MODES[i], r = msRect(i), on = i === modeSel, cx = r.x + r.w / 2, cy = r.y + 21;
+    g.fillStyle = on ? '#FFFFFF' : COL.dark; g.fillRect(r.x - 1, r.y - 1, r.w + 2, r.h + 2);
+    g.fillStyle = on ? '#2c3348' : '#171c28'; g.fillRect(r.x, r.y, r.w, r.h);
+    g.save(); g.beginPath(); g.rect(r.x, r.y, r.w, r.h); g.clip();
+    (MODE_ICONS[m.id] || ((x, y) => textC('?', x, y - 5, COL.dim, 2)))(cx, cy, on, titleT);
+    g.restore();
+    textC(m.name, cx, r.y + 39, on ? COL.head : COL.ui, 1);
+    const b = save.best[m.id] || 0; textC(b ? 'BEST ' + b : 'NEW', cx, r.y + 46, b ? COL.orb : COL.dim, 1);
+    if (i === modeIdx) { g.fillStyle = COL.head; g.fillRect(r.x + r.w - 6, r.y + 3, 3, 3); }   // dot = the mode you played last
   }
-  textC(touch.enabled ? 'TAP A MODE TO PLAY' : 'UP/DOWN: CHOOSE   ENTER: PLAY   ESC: BACK', VW / 2, 148, COL.dim, 1);
-  const bk = MS_BACK, hov = mouse.x >= bk.x && mouse.x < bk.x + bk.w && mouse.y >= bk.y && mouse.y < bk.y + bk.h;
+  textC(MODES[modeSel].desc, VW / 2, 144, COL.orange, 1);
+  textC(touch.enabled ? 'TAP A MODE TO PLAY' : 'ARROWS: CHOOSE   ENTER: PLAY   ESC: BACK', VW / 2, 153, COL.dim, 1);
+  const bk = MS_BACK, hov = inRect(mouse, bk);
   g.fillStyle = COL.dark; g.fillRect(bk.x - 1, bk.y - 1, bk.w + 2, bk.h + 2); g.fillStyle = hov ? '#2c3348' : '#1b2030'; g.fillRect(bk.x, bk.y, bk.w, bk.h);
   textC('BACK', VW / 2, bk.y + 4, hov ? COL.head : COL.ui, 1);
 }
