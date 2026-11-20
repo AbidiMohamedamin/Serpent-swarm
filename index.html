@@ -91,7 +91,7 @@ const CONFIG = {
 };
 
 const C = CONFIG;
-C.run = { weapons: true, boss: true, rampTime: 0, bosses: 1, swarm: true, laserFree: false, bruteRivals: 0, rivalKills: 0, rivalCap: 0, orbEvery: 0, orbCap: 40 };   // boss: has a boss; rampTime: ramp seconds (0 = boss.time); bosses: how many; swarm: small enemies spawn; laserFree: laser costs no segments
+C.run = { weapons: true, shed: true, boss: true, rampTime: 0, bosses: 1, swarm: true, laserFree: false, bruteRivals: 0, rivalKills: 0, rivalCap: 0, orbEvery: 0, orbCap: 40 };   // boss: has a boss; rampTime: ramp seconds (0 = boss.time); bosses: how many; swarm: small enemies spawn; laserFree: laser costs no segments
 /* ===================== GAME MODES =====================
    A mode is just a set of CONFIG overrides applied on top of the pristine defaults (BASE) when you pick it.
    Add a mode = add one entry here: { id, name, desc, set: { section: { key: value } } }. */
@@ -101,7 +101,7 @@ const MODES = [
   { id: 'rush',    name: 'BOSS RUSH', desc: 'START LONG. BOSS IN 1:00. FAST AND BRUTAL', set: { boss: { time: 60, hp: 150 }, snake: { startSegs: 14 }, rival: { first: 999 } } },
   { id: 'endless', name: 'ENDLESS',   desc: 'NO BOSS. THE SWARM NEVER STOPS GROWING', set: { run: { boss: false, rampTime: 240 }, enemy: { rampTo: 3.5 } } },
   { id: 'duel',    name: 'LASER DUEL', desc: 'INFINITE LASER. NO SWARM. KILL BOTH BOSSES', set: { run: { boss: true, bosses: 2, swarm: false, laserFree: true }, boss: { time: 2, hp: 130, teleportEvery: 4.5, blockEvery: 2.6, blockLife: 8 }, laser: { cooldown: 1.4, damage: 14 }, rival: { first: 1e9 }, snake: { startSegs: 6 } } },
-  { id: 'hunt',    name: 'RIVAL HUNT', desc: 'HUNT 5 RIVALS (THE BRUTE COUNTS 2). LASER ONLY', set: { run: { weapons: false, bruteRivals: 1, boss: false, swarm: false, rampTime: 150, rivalKills: 5, rivalCap: 3, orbEvery: 0.7, orbCap: 45 }, rival: { first: 3, every: 6, hp: 16, speed: 55, eats: true, laserOnly: true, eatPerSeg: 2, turnRate: 105 }, laser: { cost: 1, width: 14, cooldown: 0.8 }, snake: { startSegs: 8 } } },
+  { id: 'hunt',    name: 'RIVAL HUNT', desc: 'HUNT 5 RIVALS (THE BRUTE COUNTS 2). LASER ONLY', set: { run: { weapons: false, shed: false, bruteRivals: 1, boss: false, swarm: false, rampTime: 150, rivalKills: 5, rivalCap: 3, orbEvery: 0.7, orbCap: 45 }, rival: { first: 3, every: 6, hp: 16, speed: 55, eats: true, laserOnly: true, eatPerSeg: 2, turnRate: 105 }, laser: { cost: 1, width: 14, cooldown: 0.8 }, snake: { startSegs: 8 } } },
   { id: 'hard',    name: 'HARD',      desc: 'TOUGHER SWARM, EARLY RIVALS, ANGRY BOSS', set: { enemy: { spawnBase: 2.8, hpPerMinute: 0.45 }, rival: { first: 12, every: 11 }, boss: { hp: 170, teleportEvery: 2.6 }, orb: { dropChance: 0.85 } } },
 ];
 let modeIdx = 0, bossList = [], rivalKills = 0, orbT = 0, rivalSpawned = 0, rivalMsg = '';
@@ -214,7 +214,7 @@ screen.addEventListener('touchstart', e => {
     mouse = v; mouseMoved = true;
     if (S === 'play') {
       if (hitBtn(TB.pause, v)) pressed.Escape = true;
-      else if (hitBtn(TB.shed, v)) pressed.Space = true;
+      else if (C.run.shed && hitBtn(TB.shed, v)) pressed.Space = true;
       else if (hitBtn(TB.laser, v)) pressed.KeyE = true;
       else if (touch.id === null) { touch.id = t.identifier; touch.sx = v.x; touch.sy = v.y; touch.ax = touch.ay = 0; }
     } else clicked = v;
@@ -606,7 +606,7 @@ function hurtHead(n, invuln, nonLethal) {
   if (segs.length === 0) { sfx('die'); endRun('lose'); } else sfx('hurt');
 }
 function doShed() {
-  if (shedCd > 0 || segs.length < 2) return;
+  if (!C.run.shed || shedCd > 0 || segs.length < 2) return;
   const n = Math.min(Math.max(1, Math.floor(segs.length / 3)), segs.length - 1);   // never the head
   for (let i = 0; i < n; i++) {
     const s = segs.pop();
@@ -1061,7 +1061,7 @@ const TIPS = [
 ];
 function showTip() {
   let idx, guard = 0;                                    // skip tips about things the current mode doesn't have
-  do { idx = tipIdx++ % TIPS.length; } while (guard++ < 12 && ((!C.run.weapons && (idx === 1 || idx === 4 || idx === 6)) || (!C.run.boss && idx === 7)));
+  do { idx = tipIdx++ % TIPS.length; } while (guard++ < 12 && ((!C.run.weapons && (idx === 1 || idx === 4 || idx === 6)) || (!C.run.shed && idx === 3) || (!C.run.boss && idx === 7)));
   tipLines = TIPS[idx];
   if (idx === 2 && C.laser.cost !== 2) tipLines = ['PRESS E (OR X) TO SACRIFICE ' + C.laser.cost + ' SEGMENT FOR A HUGE', 'PIERCING LASER IN THE DIRECTION YOU FACE.'];
   if (C.rival.laserOnly && tipLines === TIPS[0]) tipLines = ['RIVALS ARE ARMOURED: ONLY THE LASER (E) HURTS THEM.', 'THEY EAT ORBS AND GROW. KILL ' + C.run.rivalKills + ' TO WIN.']; tipT = 7; lvlBannerT = 1.5; }
@@ -1484,8 +1484,8 @@ function drawHUD() {
   // shed cooldown
   const ready = shedCd <= 0, frac = ready ? 1 : 1 - shedCd / C.shed.cooldown;
   const bx = VW - 48, by = VH - 12;
-  text(ready ? 'SPACE:SHED' : 'SHED', ready ? VW - 4 - textW('SPACE:SHED', 1) : bx - 20, VH - 13 - (ready ? 0 : 0), ready ? COL.head : COL.dim, 1);
-  if (!ready) { g.fillStyle = COL.dark; g.fillRect(bx - 1, by - 1, 46, 7); g.fillStyle = '#2a3040'; g.fillRect(bx, by, 44, 5); g.fillStyle = COL.orange; g.fillRect(bx, by, R(44 * frac), 5); }
+  if (C.run.shed) text(ready ? 'SPACE:SHED' : 'SHED', ready ? VW - 4 - textW('SPACE:SHED', 1) : bx - 20, VH - 13 - (ready ? 0 : 0), ready ? COL.head : COL.dim, 1);
+  if (C.run.shed && !ready) { g.fillStyle = COL.dark; g.fillRect(bx - 1, by - 1, 46, 7); g.fillStyle = '#2a3040'; g.fillRect(bx, by, 44, 5); g.fillStyle = COL.orange; g.fillRect(bx, by, R(44 * frac), 5); }
   // boss bar
   const bl = bossList.filter(b => b.active);
   for (let i = 0; i < bl.length; i++) {                  // one bar per living boss, side by side when there are two
@@ -1578,7 +1578,7 @@ function drawTitle() {
   else textC('BEST ' + (save.best[mode().id] || 0) + '   WINS ' + save.wins + '   RUNS ' + save.runs, VW / 2, 130, COL.dim, 1);
   if (touch.enabled) textC('DRAG TO STEER. TAP BUTTONS FOR SHED AND LASER.', VW / 2, 141, COL.ui, 1);
   else {
-    textC('WASD / ARROWS / STICK: STEER    SPACE: SHED    E: LASER', VW / 2, 141, COL.ui, 1);
+    textC(C.run.shed ? 'WASD / ARROWS / STICK: STEER    SPACE: SHED    E: LASER' : 'WASD / ARROWS / STICK: STEER    E: LASER', VW / 2, 141, COL.ui, 1);
     textC('ESC: PAUSE   M: MUTE   F: FULLSCREEN   H: HELP', VW / 2, 149, COL.dim, 1);
   }
   textC('ARENA EDGE, BOSS AND BOSS WALLS ARE DEADLY', VW / 2, 157, COL.orange, 1);
@@ -1590,12 +1590,12 @@ function drawPause() {
   textC(mode().name + '   TIME ' + fmt(runT) + '   KILLS ' + kills + '   LEVEL ' + level, VW / 2, 32, COL.dim, 1);
   drawMenu(MENUS.paused(), 50);
   if (!touch.enabled) textC('ESC: RESUME   M: MUTE   F: FULLSCREEN', VW / 2, 130, COL.dim, 1);
-  textC(touch.enabled ? 'LASER COSTS ' + C.laser.cost + (C.laser.cost === 1 ? ' SEGMENT' : ' SEGMENTS') : 'SPACE: SHED    E: LASER (COSTS ' + C.laser.cost + (C.laser.cost === 1 ? ' SEGMENT)' : ' SEGMENTS)'), VW / 2, 142, COL.ui, 1);
+  textC(touch.enabled ? 'LASER COSTS ' + C.laser.cost + (C.laser.cost === 1 ? ' SEGMENT' : ' SEGMENTS') : (C.run.shed ? 'SPACE: SHED    ' : '') + 'E: LASER (COSTS ' + C.laser.cost + (C.laser.cost === 1 ? ' SEGMENT)' : ' SEGMENTS)'), VW / 2, 142, COL.ui, 1);
 }
 function drawTouchUI() {
   if (!touch.enabled || S !== 'play') return;
   g.setTransform(1, 0, 0, 1, 0, 0);
-  for (const b of [TB.shed, TB.laser]) {
+  for (const b of (C.run.shed ? [TB.shed, TB.laser] : [TB.laser])) {
     const ready = b === TB.shed ? shedCd <= 0 : laserReady();
     box(b.x, b.y, 28, 28, ready ? '#2c3348' : '#1b2030', ready ? (b === TB.shed ? COL.head : '#6FF0FF') : COL.dark);
     textC(b.label, b.x, b.y - 2, ready ? COL.ui : COL.dim, 1);
@@ -1920,7 +1920,7 @@ function autopilotThink() {
       }
       if (c >= (C.rival.laserOnly ? 3 : 6)) doLaser();
     }
-    if (shedCd <= 0 && segs.length >= 9) {
+    if (C.run.shed && shedCd <= 0 && segs.length >= 9) {
       const third = Math.floor(segs.length / 3); let c = 0;
       for (let i = 0; i < MAXE; i++) {
         const e = enemies[i];
