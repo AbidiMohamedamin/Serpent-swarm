@@ -76,6 +76,7 @@ const CONFIG = {
   },
   rival: {                                      // enemy snakes: hunt your head, die to any weapon, drop lots of orbs
     first: 15, every: 14, max: 4,               // first spawn (s), spawn interval (s), max alive (also capped by 1 + runTime/40)
+    bruteSpeed: 34, bruteTurn: 65, bruteHp: 2.0, bruteSpacing: 9, bruteHeadR: 8, bruteBodyR: 6, bruteHeadDamage: 3, bruteKills: 2, bruteBonusOrbs: 6,   // the BRUTE rival: slow, huge, tough, never dodges; counts as 2 kills
     eats: false, laserOnly: false,                   // Rival Hunt rules: rivals eat orbs and grow; only the laser hurts them
     eatR: 7, eatChase: 60, eatCap: 40, eatPerSeg: 3, maxLen: 20, growHp: 6,   // eating: radius, orb-chase range, orbs remembered, orbs per new segment, max length, hp per new segment
     len: 8, hp: 24, speed: 52, turnRate: 95,    // slower and clumsier than you, so they can be out-turned
@@ -89,7 +90,7 @@ const CONFIG = {
 };
 
 const C = CONFIG;
-C.run = { weapons: true, boss: true, rampTime: 0, bosses: 1, swarm: true, laserFree: false, rivalKills: 0, rivalCap: 0, orbEvery: 0, orbCap: 40 };   // boss: has a boss; rampTime: ramp seconds (0 = boss.time); bosses: how many; swarm: small enemies spawn; laserFree: laser costs no segments
+C.run = { weapons: true, boss: true, rampTime: 0, bosses: 1, swarm: true, laserFree: false, bruteRivals: 0, rivalKills: 0, rivalCap: 0, orbEvery: 0, orbCap: 40 };   // boss: has a boss; rampTime: ramp seconds (0 = boss.time); bosses: how many; swarm: small enemies spawn; laserFree: laser costs no segments
 /* ===================== GAME MODES =====================
    A mode is just a set of CONFIG overrides applied on top of the pristine defaults (BASE) when you pick it.
    Add a mode = add one entry here: { id, name, desc, set: { section: { key: value } } }. */
@@ -99,10 +100,10 @@ const MODES = [
   { id: 'rush',    name: 'BOSS RUSH', desc: 'START LONG. BOSS IN 1:00. FAST AND BRUTAL', set: { boss: { time: 60, hp: 150 }, snake: { startSegs: 14 }, rival: { first: 999 } } },
   { id: 'endless', name: 'ENDLESS',   desc: 'NO BOSS. THE SWARM NEVER STOPS GROWING', set: { run: { boss: false, rampTime: 240 }, enemy: { rampTo: 3.5 } } },
   { id: 'duel',    name: 'LASER DUEL', desc: 'INFINITE LASER. NO SWARM. KILL BOTH BOSSES', set: { run: { boss: true, bosses: 2, swarm: false, laserFree: true }, boss: { time: 2, hp: 130, teleportEvery: 4.5, blockEvery: 2.6, blockLife: 8 }, laser: { cooldown: 1.4, damage: 14 }, rival: { first: 1e9 }, snake: { startSegs: 6 } } },
-  { id: 'hunt',    name: 'RIVAL HUNT', desc: 'KILL 5 ARMOURED RIVALS. THE LASER IS ALL YOU HAVE', set: { run: { weapons: false, boss: false, swarm: false, rampTime: 150, rivalKills: 5, rivalCap: 3, orbEvery: 0.7, orbCap: 45 }, rival: { first: 3, every: 6, hp: 16, speed: 55, eats: true, laserOnly: true, eatPerSeg: 2, turnRate: 105 }, laser: { cost: 1, width: 14, cooldown: 0.8 }, snake: { startSegs: 8 } } },
+  { id: 'hunt',    name: 'RIVAL HUNT', desc: 'HUNT 5 RIVALS (THE BRUTE COUNTS 2). LASER ONLY', set: { run: { weapons: false, bruteRivals: 1, boss: false, swarm: false, rampTime: 150, rivalKills: 5, rivalCap: 3, orbEvery: 0.7, orbCap: 45 }, rival: { first: 3, every: 6, hp: 16, speed: 55, eats: true, laserOnly: true, eatPerSeg: 2, turnRate: 105 }, laser: { cost: 1, width: 14, cooldown: 0.8 }, snake: { startSegs: 8 } } },
   { id: 'hard',    name: 'HARD',      desc: 'TOUGHER SWARM, EARLY RIVALS, ANGRY BOSS', set: { enemy: { spawnBase: 2.8, hpPerMinute: 0.45 }, rival: { first: 12, every: 11 }, boss: { hp: 170, teleportEvery: 2.6 }, orb: { dropChance: 0.85 } } },
 ];
-let modeIdx = 0, bossList = [], rivalKills = 0, orbT = 0;
+let modeIdx = 0, bossList = [], rivalKills = 0, orbT = 0, rivalSpawned = 0, rivalMsg = '';
 const mode = () => MODES[modeIdx];
 function applyMode(i) {
   modeIdx = (i + MODES.length) % MODES.length;
@@ -118,7 +119,7 @@ const rnd = Math.random;
 const COL = {
   bg:'#171a22', out:'#0c0e13', grid:'#1d212c', border:'#3a4152', dark:'#0b0d12',
   head:'#F4FFE0', orange:'#FF8A3D', white:'#FFFFFF',
-  enemy:'#8470a8', boss:'#7d4a52', rival:'#8f4a5a', rivalHead:'#c0687a', orb:'#58D8E8', block:'#59505e', ui:'#E8ECF5', dim:'#8a93a8'
+  enemy:'#8470a8', boss:'#7d4a52', rival:'#8f4a5a', rivalHead:'#c0687a', brute:'#a8652f', bruteHead:'#e39a52', orb:'#58D8E8', block:'#59505e', ui:'#E8ECF5', dim:'#8a93a8'
 };
 const WEAPONS = {
   spitter:{ color:'#B7F34A' },
@@ -434,7 +435,7 @@ for (let i = 0; i < C.pools.rings; i++) rings.push({ active:false, x:0, y:0, r:0
 for (let i = 0; i < C.pools.beams; i++) beams.push({ active:false, x1:0, y1:0, x2:0, y2:0, life:0, w:3 });
 
 const rivals = [];                                      // enemy snakes; their segments live in the enemy pool (owner = rival index)
-for (let i = 0; i < C.rival.max; i++) rivals.push({ active: false, idx: [], hp: 0, maxHp: 0, ang: 0, recoil: 0, eaten: 0 });
+for (let i = 0; i < C.rival.max; i++) rivals.push({ active: false, idx: [], hp: 0, maxHp: 0, ang: 0, recoil: 0, eaten: 0, brute: false });
 function takeFree(pool) { for (let i = 0; i < pool.length; i++) if (!pool[i].active) return pool[i]; return null; }
 
 // Spatial hash for ENEMIES (rebuilt every tick). Linked lists in typed arrays => zero allocation.
@@ -486,7 +487,7 @@ function newRun() {
   for (const a of [enemies, bolts, orbs, parts, rings, beams]) for (const o of a) o.active = false;
   maxLen = C.snake.startSegs; newBest = false;
   runT = 0; kills = 0; level = 1; xp = 0; xpNeed = C.xp.base; orbCount = 0; pendingLevels = 0;
-  hitstop = 0; pendingWin = false; shake = 0; bannerT = 0; bossSpawned = false; boss = null; bossList = []; rivalKills = 0; orbT = 0;
+  hitstop = 0; pendingWin = false; shake = 0; bannerT = 0; bossSpawned = false; boss = null; bossList = []; rivalKills = 0; orbT = 0; rivalSpawned = 0; rivalMsg = '';
   deathMsg = 'THE SWARM GOT YOU'; rivalT = C.rival.first; rivalBannerT = 0; for (const r of rivals) r.active = false; lvlBannerT = 0; tipT = 0; tipIdx = 0; laserCd = 0; spawnT = 1.0; shedCd = 0; lockT = 0; sel = 1;
   P = { speed: 0, turn: 0, orb: 0, weapon: C.run.weapons ? 'spitter' : 'plain' };
   shedSegs = []; blocks = [];
@@ -718,35 +719,40 @@ function spawnRival() {
   if (!r) return;
   spawnPoint();
   const ang = Math.atan2(AH / 2 - sp.y, AW / 2 - sp.x);
+  let bruteAlive = 0; for (const q of rivals) if (q.active && q.brute) bruteAlive++;
+  const brute = !!(C.run.bruteRivals && bruteAlive < C.run.bruteRivals && rivalSpawned >= 1);   // the first rival is a normal one
+  const spc = brute ? C.rival.bruteSpacing : C.rival.spacing;
   r.idx.length = 0;
   for (let i = 0; i < C.rival.len; i++) {
     const k = freeEnemyIndex();
     if (k < 0) { for (const j of r.idx) enemies[j].active = false; r.idx.length = 0; return; }
     const e = enemies[k];
-    e.active = true; e.boss = false; e.owner = ri; e.seg = i; e.hp = e.maxHp = 1; e.speed = 0; e.r = i === 0 ? 4.5 : 3.5;
-    e.x = sp.x - Math.cos(ang) * i * C.rival.spacing; e.y = sp.y - Math.sin(ang) * i * C.rival.spacing;
+    e.active = true; e.boss = false; e.owner = ri; e.seg = i; e.hp = e.maxHp = 1; e.speed = 0; e.r = brute ? (i === 0 ? C.rival.bruteHeadR : C.rival.bruteBodyR) : (i === 0 ? 4.5 : 3.5);
+    e.x = sp.x - Math.cos(ang) * i * spc; e.y = sp.y - Math.sin(ang) * i * spc;
     e.flash = 0; e.spikeT = 0; e.atk = 0; e.touchCd = 0; e.tele = 0;
     r.idx.push(k);
   }
   r.hp = r.maxHp = C.rival.hp * (1 + C.enemy.hpPerMinute * minuteIdx());
-  r.ang = ang; r.recoil = 0; r.eaten = 0; r.active = true;
-  rivalBannerT = 2.5; sfx('rival');
+  r.ang = ang; r.recoil = 0; r.eaten = 0; r.active = true; r.brute = brute;
+  rivalSpawned++;
+  if (brute) { r.hp = r.maxHp = r.maxHp * C.rival.bruteHp; rivalMsg = 'BRUTE RIVAL! SLOW, HUGE AND TOUGH'; } else rivalMsg = '';
+  rivalBannerT = brute ? 3 : 2.5; sfx('rival');
 }
 function growRival(r) {                                    // an eating rival gets longer (and tougher)
   if (r.idx.length >= C.rival.maxLen) return;
   const k = freeEnemyIndex();
   if (k < 0) return;
   const last = enemies[r.idx[r.idx.length - 1]], e = enemies[k];
-  e.active = true; e.boss = false; e.owner = rivals.indexOf(r); e.seg = r.idx.length; e.hp = e.maxHp = 1; e.speed = 0; e.r = 3.5;
+  e.active = true; e.boss = false; e.owner = rivals.indexOf(r); e.seg = r.idx.length; e.hp = e.maxHp = 1; e.speed = 0; e.r = r.brute ? C.rival.bruteBodyR : 3.5;
   e.x = last.x; e.y = last.y; e.flash = 0; e.spikeT = 0; e.atk = 0; e.touchCd = 0; e.tele = 0;
   r.idx.push(k); r.maxHp += C.rival.growHp; r.hp += C.rival.growHp;
   spawnRing(last.x, last.y, 2, 14, 0.25, COL.rivalHead);
 }
 function updateRivals(dt) {
-  const dtr = rad(C.rival.turnRate) * dt, sp2 = C.rival.spacing;
   for (const r of rivals) {
     if (!r.active) continue;
     const h = enemies[r.idx[0]];
+    const dtr = rad(r.brute ? C.rival.bruteTurn : C.rival.turnRate) * dt, sp2 = r.brute ? C.rival.bruteSpacing : C.rival.spacing, rspd = r.brute ? C.rival.bruteSpeed : C.rival.speed;
     let want;
     if (r.recoil > 0) { r.recoil -= dt; want = Math.atan2(h.y - head.y, h.x - head.x); }       // back off after a bite
     else if (h.x < C.rival.edgeMargin || h.x > AW - C.rival.edgeMargin || h.y < C.rival.edgeMargin || h.y > AH - C.rival.edgeMargin)
@@ -760,13 +766,13 @@ function updateRivals(dt) {
       }
     }
     r.ang += clamp(angDiff(r.ang, want), -dtr, dtr);                                               // limited turn rate => can be dodged
-    h.x = clamp(h.x + Math.cos(r.ang) * C.rival.speed * dt, 4, AW - 4);
-    h.y = clamp(h.y + Math.sin(r.ang) * C.rival.speed * dt, 4, AH - 4);
+    h.x = clamp(h.x + Math.cos(r.ang) * rspd * dt, 4, AW - 4);
+    h.y = clamp(h.y + Math.sin(r.ang) * rspd * dt, 4, AH - 4);
     h.atk = Math.hypot(head.x - h.x, head.y - h.y) < 16 ? 0.12 : 0;
     if (C.rival.eats) for (const o of orbs) {                                                       // the rival's head EATS orbs (you get them back when you kill her)
       if (!o.active) continue;
       const dx = o.x - h.x, dy = o.y - h.y;
-      if (dx * dx + dy * dy < C.rival.eatR * C.rival.eatR) {
+      if (dx * dx + dy * dy < (C.rival.eatR + (r.brute ? 4 : 0)) * (C.rival.eatR + (r.brute ? 4 : 0))) {
         o.active = false; r.eaten = Math.min(C.rival.eatCap, r.eaten + 1);
         spawnRing(h.x, h.y, 2, 10, 0.2, COL.orb);
         if (r.eaten % C.rival.eatPerSeg === 0) growRival(r);
@@ -780,7 +786,7 @@ function updateRivals(dt) {
   }
 }
 function killRival(r) {
-  r.active = false; kills++; rivalKills++; sfx('big');
+  r.active = false; kills++; rivalKills += r.brute ? C.rival.bruteKills : 1; sfx('big');
   for (const k of r.idx) {
     const e = enemies[k];
     e.active = false; e.owner = -1;
@@ -789,6 +795,7 @@ function killRival(r) {
     if (o) { o.active = true; o.x = e.x; o.y = e.y; } else gainOrb(C.orb.value + P.orb);
   }
   const h = enemies[r.idx[0]];
+  if (r.brute) r.eaten += C.rival.bruteBonusOrbs;           // the brute pays extra
   for (let i = 0; i < r.eaten; i++) {                                                               // everything she ate comes back, scattered
     const o = takeFree(orbs), a = rnd() * TAU, d = 4 + rnd() * 16;
     if (o) { o.active = true; o.x = clamp(h.x + Math.cos(a) * d, 4, AW - 4); o.y = clamp(h.y + Math.sin(a) * d, 4, AH - 4); } else gainOrb(C.orb.value + P.orb);
@@ -963,7 +970,7 @@ function headCollisions() {
     const rr = e.r + hr, dx = e.x - head.x, dy = e.y - head.y;
     if (dx * dx + dy * dy >= rr * rr) continue;
     if (e.owner >= 0) {                                  // touching a rival snake: lose segments, it recoils
-      if (head.invuln <= 0) { rivals[e.owner].recoil = C.rival.recoil; hurtHead(e.seg === 0 ? C.rival.headDamage : C.rival.bodyDamage); if (segs.length === 0) deathMsg = 'A RIVAL SNAKE GOT YOU'; }
+      if (head.invuln <= 0) { rivals[e.owner].recoil = C.rival.recoil; hurtHead(e.seg === 0 ? (rivals[e.owner].brute ? C.rival.bruteHeadDamage : C.rival.headDamage) : C.rival.bodyDamage); if (segs.length === 0) deathMsg = 'A RIVAL SNAKE GOT YOU'; }
       if (S !== 'play') return;
       continue;
     }
@@ -1382,16 +1389,17 @@ function drawWorld() {
   for (let i = 0; i < MAXE; i++) {
     const e = enemies[i];
     if (!e.active) continue;
-    const col = e.flash > 0 ? '#FFFFFF' : e.atk > 0 ? COL.orange : (e.owner >= 0 ? (e.seg === 0 ? COL.rivalHead : COL.rival) : e.boss ? COL.boss : COL.enemy);
+    const col = e.flash > 0 ? '#FFFFFF' : e.atk > 0 ? COL.orange : (e.owner >= 0 ? (rivals[e.owner].brute ? (e.seg === 0 ? COL.bruteHead : COL.brute) : (e.seg === 0 ? COL.rivalHead : COL.rival)) : e.boss ? COL.boss : COL.enemy);
     if (e.boss) {
       box(e.x, e.y, 25, 25, col);
       g.fillStyle = COL.dark; g.fillRect(R(e.x) - 7, R(e.y) - 5, 4, 4); g.fillRect(R(e.x) + 4, R(e.y) - 5, 4, 4);
     } else if (e.owner >= 0 && e.seg === 0) {
-      box(e.x, e.y, 7, 7, col);
-      const r = rivals[e.owner], dx = Math.cos(r.ang), dy = Math.sin(r.ang);
+      const r = rivals[e.owner], dx = Math.cos(r.ang), dy = Math.sin(r.ang), m = r.brute ? 2 : 1;
+      box(e.x, e.y, r.brute ? 14 : 7, r.brute ? 14 : 7, col);
       g.fillStyle = COL.dark;
-      for (const sd of [-1, 1]) g.fillRect(R(e.x + dx * 1.5 - dy * 2 * sd), R(e.y + dy * 1.5 + dx * 2 * sd), 1, 1);
-    } else box(e.x, e.y, 5, 5, col);
+      for (const sd of [-1, 1]) g.fillRect(R(e.x + dx * 1.5 * m - dy * 2 * m * sd), R(e.y + dy * 1.5 * m + dx * 2 * m * sd), m, m);
+    } else if (e.owner >= 0 && rivals[e.owner].brute) box(e.x, e.y, 10, 10, col);
+    else box(e.x, e.y, 5, 5, col);
   }
   // boss teleport marker: orange ring where it will land
   for (const bb of bossList) if (bb.active && bb.tele > 0) {
@@ -1447,7 +1455,7 @@ function drawHUD() {
   const lOk = laserReady();
   text(C.run.laserFree ? 'E:LASER' : 'E:LASER -' + C.laser.cost, 34, VH - 13, lOk ? '#6FF0FF' : COL.dim, 1);
   if (C.run.laserFree && !lOk) { const lf = 1 - laserCd / C.laser.cooldown; g.fillStyle = COL.dark; g.fillRect(33, VH - 6 - 1, 32, 3); g.fillStyle = '#6FF0FF'; g.fillRect(34, VH - 6, R(30 * lf), 1); }
-  if (C.run.rivalKills) text('RIVALS ' + rivalKills + '/' + C.run.rivalKills, 4, 31, COL.rivalHead, 1);
+  if (C.run.rivalKills) text('RIVALS ' + Math.min(rivalKills, C.run.rivalKills) + '/' + C.run.rivalKills, 4, 31, COL.rivalHead, 1);
   if (C.run.boss && !bossSpawned) text('BOSS IN ' + fmt(Math.max(0, C.boss.time - runT)), 4, 31, COL.dim, 1);
   text('NEXT', VW / 2 + 14, VH - 13, COL.dim, 1);
   drawWeapon(P.weapon, VW / 2 + 38, VH - 11);
@@ -1475,7 +1483,7 @@ function drawHUD() {
     text('TIP', 22, 124, COL.orb, 1);
     for (let k = 0; k < tipLines.length; k++) text(tipLines[k], 22, 133 + k * 8, COL.ui, 1);
   }
-  if (rivalBannerT > 0 && ((rivalBannerT * 6) | 0) % 2 === 0) textC(C.rival.laserOnly ? 'ARMOURED RIVAL! FIRE THE LASER (E)!' : 'RIVAL SNAKE HUNTING YOU!', VW / 2, 56, COL.rivalHead, 1);
+  if (rivalBannerT > 0 && ((rivalBannerT * 6) | 0) % 2 === 0) textC(rivalMsg || (C.rival.laserOnly ? 'ARMOURED RIVAL! FIRE THE LASER (E)!' : 'RIVAL SNAKE HUNTING YOU!'), VW / 2, 56, rivalMsg ? COL.bruteHead : COL.rivalHead, 1);
   if (bannerT > 0 && ((bannerT * 6) | 0) % 2 === 0) textC(C.run.bosses > 1 ? 'TWO BOSSES! SURVIVE AND FIRE THE LASER!' : 'THE MINI-BOSS APPROACHES!', VW / 2, 20, COL.orange, 1);
 }
 function dim(a) { g.fillStyle = 'rgba(8,10,16,' + a + ')'; g.fillRect(0, 0, VW, VH); }
@@ -1880,7 +1888,7 @@ function autopilotThink() {
 
   // abilities (checked a few times per second)
   if (apTick % 5 === 0) {
-    if (laserCd <= 0 && (C.run.laserFree || segs.length > C.laser.cost + 4)) {
+    if (laserCd <= 0 && (C.run.laserFree || segs.length > C.laser.cost + (C.rival.laserOnly ? 0 : 4))) {
       let c = 0;
       for (let i = 0; i < MAXE; i++) {
         const e = enemies[i];
