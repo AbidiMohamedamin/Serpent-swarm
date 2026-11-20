@@ -89,7 +89,7 @@ const CONFIG = {
 };
 
 const C = CONFIG;
-C.run = { boss: true, rampTime: 0, bosses: 1, swarm: true, laserFree: false, rivalKills: 0, rivalCap: 0, orbEvery: 0, orbCap: 40 };   // boss: has a boss; rampTime: ramp seconds (0 = boss.time); bosses: how many; swarm: small enemies spawn; laserFree: laser costs no segments
+C.run = { weapons: true, boss: true, rampTime: 0, bosses: 1, swarm: true, laserFree: false, rivalKills: 0, rivalCap: 0, orbEvery: 0, orbCap: 40 };   // boss: has a boss; rampTime: ramp seconds (0 = boss.time); bosses: how many; swarm: small enemies spawn; laserFree: laser costs no segments
 /* ===================== GAME MODES =====================
    A mode is just a set of CONFIG overrides applied on top of the pristine defaults (BASE) when you pick it.
    Add a mode = add one entry here: { id, name, desc, set: { section: { key: value } } }. */
@@ -99,7 +99,7 @@ const MODES = [
   { id: 'rush',    name: 'BOSS RUSH', desc: 'START LONG. BOSS IN 1:00. FAST AND BRUTAL', set: { boss: { time: 60, hp: 150 }, snake: { startSegs: 14 }, rival: { first: 999 } } },
   { id: 'endless', name: 'ENDLESS',   desc: 'NO BOSS. THE SWARM NEVER STOPS GROWING', set: { run: { boss: false, rampTime: 240 }, enemy: { rampTo: 3.5 } } },
   { id: 'duel',    name: 'LASER DUEL', desc: 'INFINITE LASER. NO SWARM. KILL BOTH BOSSES', set: { run: { boss: true, bosses: 2, swarm: false, laserFree: true }, boss: { time: 2, hp: 130, teleportEvery: 4.5, blockEvery: 2.6, blockLife: 8 }, laser: { cooldown: 1.4, damage: 14 }, rival: { first: 1e9 }, snake: { startSegs: 6 } } },
-  { id: 'hunt',    name: 'RIVAL HUNT', desc: 'KILL 5 ARMOURED RIVALS. ONLY THE LASER WORKS', set: { run: { boss: false, swarm: false, rampTime: 150, rivalKills: 5, rivalCap: 3, orbEvery: 0.7, orbCap: 45 }, rival: { first: 3, every: 6, hp: 16, speed: 55, eats: true, laserOnly: true, eatPerSeg: 2, turnRate: 105 }, laser: { cost: 1, width: 14, cooldown: 0.8 }, snake: { startSegs: 8 } } },
+  { id: 'hunt',    name: 'RIVAL HUNT', desc: 'KILL 5 ARMOURED RIVALS. THE LASER IS ALL YOU HAVE', set: { run: { weapons: false, boss: false, swarm: false, rampTime: 150, rivalKills: 5, rivalCap: 3, orbEvery: 0.7, orbCap: 45 }, rival: { first: 3, every: 6, hp: 16, speed: 55, eats: true, laserOnly: true, eatPerSeg: 2, turnRate: 105 }, laser: { cost: 1, width: 14, cooldown: 0.8 }, snake: { startSegs: 8 } } },
   { id: 'hard',    name: 'HARD',      desc: 'TOUGHER SWARM, EARLY RIVALS, ANGRY BOSS', set: { enemy: { spawnBase: 2.8, hpPerMinute: 0.45 }, rival: { first: 12, every: 11 }, boss: { hp: 170, teleportEvery: 2.6 }, orb: { dropChance: 0.85 } } },
 ];
 let modeIdx = 0, bossList = [], rivalKills = 0, orbT = 0;
@@ -124,6 +124,7 @@ const WEAPONS = {
   spitter:{ color:'#B7F34A' },
   spike:  { color:'#FFB13D', fuse:'mace'  },
   laser:  { color:'#6FF0FF' },
+  plain:  { color:'#5E9E3B' },                      // a bare body segment (modes without Spitters/Spikes)
   mace:   { color:'#FFE27A' }
 };
 
@@ -487,7 +488,7 @@ function newRun() {
   runT = 0; kills = 0; level = 1; xp = 0; xpNeed = C.xp.base; orbCount = 0; pendingLevels = 0;
   hitstop = 0; pendingWin = false; shake = 0; bannerT = 0; bossSpawned = false; boss = null; bossList = []; rivalKills = 0; orbT = 0;
   deathMsg = 'THE SWARM GOT YOU'; rivalT = C.rival.first; rivalBannerT = 0; for (const r of rivals) r.active = false; lvlBannerT = 0; tipT = 0; tipIdx = 0; laserCd = 0; spawnT = 1.0; shedCd = 0; lockT = 0; sel = 1;
-  P = { speed: 0, turn: 0, orb: 0, weapon: 'spitter' };
+  P = { speed: 0, turn: 0, orb: 0, weapon: C.run.weapons ? 'spitter' : 'plain' };
   shedSegs = []; blocks = [];
   head = { x: AW / 2, y: AH / 2, ang: 0, invuln: 0, stun: 0, grace: 0, hurtFlash: 0, t: 0 };
   // pre-fill the path behind the head so the starting body is laid out straight
@@ -495,7 +496,7 @@ function newRun() {
   const L = (C.snake.startSegs + 30) * C.snake.spacing;
   for (let k = L; k >= 0; k--) pathPush(head.x - k, head.y);
   segs = [];
-  for (let i = 0; i < C.snake.startSegs; i++) segs.push({ type: 'spitter', x: head.x, y: head.y, cd: rnd() * C.spitter.interval });
+  for (let i = 0; i < C.snake.startSegs; i++) segs.push({ type: C.run.weapons ? 'spitter' : 'plain', x: head.x, y: head.y, cd: rnd() * C.spitter.interval });
   updateSegments();
   cam.x = head.x; cam.y = head.y;
   S = 'play';
@@ -897,6 +898,7 @@ function updateWeapons(dt) {
   for (let i = 0; i < segs.length; i++) {
     const s = segs[i];
     s.cd -= dt;
+    if (s.type === 'plain') continue;                    // no weapon
     if (s.type === 'spitter') {
       if (s.cd <= 0) {
         const t = nearestEnemy(s.x, s.y, C.spitter.range);
@@ -1028,7 +1030,12 @@ const TIPS = [
   ['EVERY ' + C.snake.orbsPerSeg + ' ORBS ADD A SEGMENT. MORE SEGMENTS = MORE', 'FIREPOWER, BUT A LONGER BODY IS HARDER TO STEER.'],
   ['THE BOSS TELEPORTS NEAR YOU. AN ORANGE RING SHOWS', 'WHERE IT LANDS. BOSS OR BOSS WALL ON YOUR HEAD = DEFEAT.']
 ];
-function showTip() { tipLines = TIPS[tipIdx++ % TIPS.length]; if (C.rival.laserOnly && tipLines === TIPS[0]) tipLines = ['RIVALS ARE ARMOURED: ONLY THE LASER (E) HURTS THEM.', 'THEY EAT ORBS AND GROW. KILL ' + C.run.rivalKills + ' TO WIN.']; tipT = 7; lvlBannerT = 1.5; }
+function showTip() {
+  let idx, guard = 0;                                    // skip tips about things the current mode doesn't have
+  do { idx = tipIdx++ % TIPS.length; } while (guard++ < 12 && ((!C.run.weapons && (idx === 1 || idx === 4 || idx === 6)) || (!C.run.boss && idx === 7)));
+  tipLines = TIPS[idx];
+  if (idx === 2 && C.laser.cost !== 2) tipLines = ['PRESS E (OR X) TO SACRIFICE ' + C.laser.cost + ' SEGMENT FOR A HUGE', 'PIERCING LASER IN THE DIRECTION YOU FACE.'];
+  if (C.rival.laserOnly && tipLines === TIPS[0]) tipLines = ['RIVALS ARE ARMOURED: ONLY THE LASER (E) HURTS THEM.', 'THEY EAT ORBS AND GROW. KILL ' + C.run.rivalKills + ' TO WIN.']; tipT = 7; lvlBannerT = 1.5; }
 function updateOrbs(dt) {
   const m2 = C.orb.magnet * C.orb.magnet, p2 = C.orb.pickR * C.orb.pickR;
   for (let i = 0; i < orbs.length; i++) {
@@ -1054,7 +1061,7 @@ const CARDS = [
     tip:['EVERY ORB COUNTS +1: FASTER GROWTH AND FASTER', 'LEVELS (' + C.snake.orbsPerSeg + ' ORB VALUE = 1 NEW SEGMENT).'] }
 ];
 function openCards() {
-  const pool = CARDS.slice();
+  const pool = CARDS.filter(c => C.run.weapons || (c.id !== 'spitter' && c.id !== 'spike'));   // no weapon cards when the mode has no Spitters/Spikes
   cardChoices = [];
   for (let i = 0; i < 3; i++) cardChoices.push(pool.splice((rnd() * pool.length) | 0, 1)[0]);
   S = 'levelup'; lockT = 0.4; sel = 1;
@@ -1314,7 +1321,7 @@ function diamond(cx, cy, r, fill) {
 }
 function drawWeapon(type, x, y, over) {
   const col = over || WEAPONS[type].color;
-  if (type === 'spitter') box(x, y, 5, 5, col);
+  if (type === 'spitter' || type === 'plain') box(x, y, 5, 5, col);
   else if (type === 'laser') { box(x, y, 7, 7, col); g.fillStyle = '#FFFFFF'; g.fillRect(R(x) - 1, R(y) - 1, 3, 3); }
   else if (type === 'spike') diamond(x, y, 3, col);
   else diamond(x, y, 4, col);
