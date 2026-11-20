@@ -30,6 +30,7 @@ Pick a mode on the title screen (left/right on the MODE row). Records are saved 
 | Classic | Survive 3:00, then kill the mini-boss. |
 | Boss Rush | Start with 14 segments, boss at 1:00 with less health. |
 | Endless | No boss; the swarm keeps ramping. Survival time adds to your score. |
+| Laser Duel | Two bosses from the first seconds, no swarm and no rivals. The laser is free (no segments lost) with a 1.4 s cooldown. Kill both to win; faster wins score more. |
 | Hard | Tougher swarm, rivals from 0:12, a faster and tougher boss. |
 
 Modes are CONFIG overrides: add an entry to the `MODES` array near the top of the script.
@@ -49,4 +50,5 @@ New ideas live on the `experiments` branch (cone laser, boss health bar, laser-o
 
 The APK is a minimal Android WebView app (`MainActivity.java` + manifest) with `index.html` bundled as an asset.
 Build tools are not included in this repo.
+
 
