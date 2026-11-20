@@ -1203,7 +1203,7 @@ const MX = VW / 2 - 72, MW = 144, MBAR = 74;
 const MENUS = {
   title: () => [
     { label: 'PLAY', act: () => { autopilot = false; newRun(); } },
-    { label: () => 'MODE: ' + mode().name, cycle: d => { applyMode(modeIdx + d); save.modeId = mode().id; writeSave(); } },
+    { label: () => 'SELECT MODE (' + mode().name + ')', act: () => openModes() },
     { label: 'HOW TO PLAY', act: () => openGuide('title') },
     { label: 'MUSIC', vol: 'musicVol' },
     { label: 'SOUND FX', vol: 'sfxVol' },
@@ -1255,6 +1255,43 @@ function updateMenu(items, y0) {
     }
   }
 }
+/* ---- MODE SELECT screen: pick any mode from a list (name, rules, your best score) ---- */
+let modeSel = 0;
+const MS_Y0 = 24, MS_RH = 20, MS_BACK = { x: 125, y: 161, w: 70, h: 13 };
+function openModes() { modeSel = modeIdx; S = 'modes'; mouseMoved = false; clicked = null; sfx('select'); }
+function startMode(i) { applyMode(i); save.modeId = mode().id; writeSave(); autopilot = false; sfx('select'); newRun(); }
+function updateModes() {
+  const n = MODES.length;
+  const inRow = (p, i) => p.x >= 20 && p.x < 300 && p.y >= MS_Y0 + i * MS_RH && p.y < MS_Y0 + (i + 1) * MS_RH - 1;
+  const inBack = p => p.x >= MS_BACK.x && p.x < MS_BACK.x + MS_BACK.w && p.y >= MS_BACK.y && p.y < MS_BACK.y + MS_BACK.h;
+  if (mouseMoved) { mouseMoved = false; for (let i = 0; i < n; i++) if (inRow(mouse, i) && modeSel !== i) { modeSel = i; sfx('move'); } }
+  if (took('ArrowDown') || took('KeyS') || took('PadDown')) { modeSel = (modeSel + 1) % n; sfx('move'); }
+  if (took('ArrowUp') || took('KeyW') || took('PadUp')) { modeSel = (modeSel + n - 1) % n; sfx('move'); }
+  if (took('Enter') || took('Space') || took('PadA')) { startMode(modeSel); return; }
+  if (took('Escape') || took('Backspace') || took('PadB')) { S = 'title'; menuSel = 1; clicked = null; sfx('back'); return; }
+  if (clicked) {
+    if (inBack(clicked)) { S = 'title'; menuSel = 1; clicked = null; sfx('back'); return; }
+    for (let i = 0; i < n; i++) if (inRow(clicked, i)) { modeSel = i; startMode(i); return; }
+  }
+}
+function drawModes() {
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  drawFloor(AW / 2, AH / 2); dim(0.6);
+  textC('SELECT MODE', VW / 2, 5, COL.head, 2);
+  for (let i = 0; i < MODES.length; i++) {
+    const m = MODES[i], y = MS_Y0 + i * MS_RH, on = i === modeSel;
+    if (on) { g.fillStyle = COL.dark; g.fillRect(19, y - 1, 282, MS_RH - 1); g.fillStyle = '#2c3348'; g.fillRect(20, y, 280, MS_RH - 3); g.fillStyle = COL.head; g.fillRect(20, y, 2, MS_RH - 3); }
+    else { g.fillStyle = 'rgba(31,36,51,0.7)'; g.fillRect(20, y, 280, MS_RH - 3); }
+    text(m.name, 28, y + 3, on ? COL.head : COL.ui, 1);
+    if (i === modeIdx) text('LAST PLAYED', 28 + textW(m.name, 1) + 6, y + 3, COL.dim, 1);
+    const b = 'BEST ' + (save.best[m.id] || 0); text(b, 294 - textW(b, 1), y + 3, (save.best[m.id] || 0) ? COL.orb : COL.dim, 1);
+    text(m.desc, 28, y + 11, on ? COL.orange : COL.dim, 1);
+  }
+  textC(touch.enabled ? 'TAP A MODE TO PLAY' : 'UP/DOWN: CHOOSE   ENTER: PLAY   ESC: BACK', VW / 2, 148, COL.dim, 1);
+  const bk = MS_BACK, hov = mouse.x >= bk.x && mouse.x < bk.x + bk.w && mouse.y >= bk.y && mouse.y < bk.y + bk.h;
+  g.fillStyle = COL.dark; g.fillRect(bk.x - 1, bk.y - 1, bk.w + 2, bk.h + 2); g.fillStyle = hov ? '#2c3348' : '#1b2030'; g.fillRect(bk.x, bk.y, bk.w, bk.h);
+  textC('BACK', VW / 2, bk.y + 4, hov ? COL.head : COL.ui, 1);
+}
 function update(dt) {
   titleT += dt;
   if (toastT > 0) toastT -= dt;
@@ -1276,6 +1313,7 @@ function update(dt) {
       break;
     case 'levelup': updateCards(dt); break;
     case 'guide': updateGuide(dt); break;
+    case 'modes': updateModes(); break;
     case 'win': case 'lose':
       updateFx(dt); updateCamera(dt);
       if (autopilot && (cardWait += dt) > 4) { cardWait = 0; newRun(); }   // bot restarts by itself
@@ -1572,7 +1610,7 @@ function drawTitle() {
   for (let i = 0; i < name.length; i++) text(name[i], VW / 2 - textW(name, 4) / 2 + i * 16, 8 + Math.round(Math.sin(titleT * 3 + i * 0.6) * 2), i < 7 ? COL.head : COL.orange, 4);
   textC('YOUR BODY IS THE WEAPON', VW / 2, 34, COL.dim, 1);
   drawMenu(MENUS.title(), 42);
-  textC(mode().desc, VW / 2, 120, COL.orange, 1);
+  textC(mode().name + ': ' + mode().desc, VW / 2, 120, COL.orange, 1);
   if (!AUD.ctx) { if (((titleT * 2) | 0) % 2 === 0) textC(touch.enabled ? 'TAP ANYWHERE FOR SOUND' : 'PRESS ANY KEY FOR SOUND', VW / 2, 130, COL.orange, 1); }
   else if (save.runs === 0) textC('NEW HERE? OPEN HOW TO PLAY FIRST', VW / 2, 130, COL.orb, 1);
   else textC('BEST ' + (save.best[mode().id] || 0) + '   WINS ' + save.wins + '   RUNS ' + save.runs, VW / 2, 130, COL.dim, 1);
@@ -1948,6 +1986,7 @@ const isPortrait = () => touch.enabled && innerHeight > innerWidth * 1.15;
 function render() {
   if (S === 'title') drawTitle();
   else if (S === 'guide') drawGuide();
+  else if (S === 'modes') drawModes();
   else {
     drawWorld();
     drawHUD();

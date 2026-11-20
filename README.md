@@ -23,7 +23,7 @@ Music and sound effects are synthesized live with WebAudio.
 
 ## Modes
 
-Pick a mode on the title screen (left/right on the MODE row). Records are saved per mode.
+Open SELECT MODE on the title screen to see every mode with its rules and your best score, then pick one to play. Records are saved per mode.
 
 | Mode | What changes |
 |---|---|
@@ -51,6 +51,7 @@ New ideas live on the `experiments` branch (cone laser, boss health bar, laser-o
 
 The APK is a minimal Android WebView app (`MainActivity.java` + manifest) with `index.html` bundled as an asset.
 Build tools are not included in this repo.
+
 
 
 
