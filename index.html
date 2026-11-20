@@ -87,6 +87,25 @@ const CONFIG = {
 };
 
 const C = CONFIG;
+C.run = { boss: true, rampTime: 0 };               // boss: does the run have a boss at all; rampTime: seconds for the difficulty ramp (0 = boss.time)
+/* ===================== GAME MODES =====================
+   A mode is just a set of CONFIG overrides applied on top of the pristine defaults (BASE) when you pick it.
+   Add a mode = add one entry here: { id, name, desc, set: { section: { key: value } } }. */
+const BASE = structuredClone(CONFIG);
+const MODES = [
+  { id: 'classic', name: 'CLASSIC',   desc: 'SURVIVE 3:00, THEN KILL THE MINI-BOSS', set: {} },
+  { id: 'rush',    name: 'BOSS RUSH', desc: 'START LONG. BOSS IN 1:00. FAST AND BRUTAL', set: { boss: { time: 60, hp: 150 }, snake: { startSegs: 14 }, rival: { first: 999 } } },
+  { id: 'endless', name: 'ENDLESS',   desc: 'NO BOSS. THE SWARM NEVER STOPS GROWING', set: { run: { boss: false, rampTime: 240 }, enemy: { rampTo: 3.5 } } },
+  { id: 'hard',    name: 'HARD',      desc: 'TOUGHER SWARM, EARLY RIVALS, ANGRY BOSS', set: { enemy: { spawnBase: 2.8, hpPerMinute: 0.45 }, rival: { first: 12, every: 11 }, boss: { hp: 170, teleportEvery: 2.6 }, orb: { dropChance: 0.85 } } },
+];
+let modeIdx = 0;
+const mode = () => MODES[modeIdx];
+function applyMode(i) {
+  modeIdx = (i + MODES.length) % MODES.length;
+  for (const k in BASE) Object.assign(CONFIG[k], structuredClone(BASE[k]));      // back to pristine defaults...
+  const set = MODES[modeIdx].set;
+  for (const k in set) Object.assign(CONFIG[k], set[k]);                          // ...then the mode's overrides
+}
 const VW = C.view.w, VH = C.view.h, AW = C.arena.w, AH = C.arena.h;
 const TICK = 1 / 60;
 const TAU = Math.PI * 2;
@@ -241,8 +260,11 @@ function readSteer() {
 
 /* ===================== SAVE DATA (best score, volume) ===================== */
 const SAVE_KEY = 'serpent-swarm-save-v1';
-const save = { bestScore: 0, bestKills: 0, wins: 0, runs: 0, musicVol: 6, sfxVol: 8, muted: false };
+const save = { bestScore: 0, bestKills: 0, wins: 0, runs: 0, musicVol: 6, sfxVol: 8, muted: false, best: {}, modeId: 'classic' };
 try { Object.assign(save, JSON.parse(localStorage.getItem(SAVE_KEY)) || {}); } catch (err) {}
+if (!save.best) save.best = {};
+if (save.bestScore && !save.best.classic) save.best.classic = save.bestScore;   // carry over records from before modes existed
+applyMode(Math.max(0, MODES.findIndex(m => m.id === save.modeId)));
 function writeSave() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch (err) {} }
 
 /* ===================== AUDIO (everything synthesized with WebAudio: no files) ===================== */
@@ -386,7 +408,7 @@ function musicDirector() {                                  // choose the track 
   let tr = 'title';
   if (inRun) tr = (bossSpawned && boss && boss.active) ? 'boss' : 'game';
   else if (S === 'win' || S === 'lose') tr = 'end';
-  MUS.I = inRun ? clamp(runT / C.boss.time, 0, 1) : 0;
+  MUS.I = inRun ? clamp(runT / (C.run.rampTime || C.boss.time), 0, 1) : 0;
   musicSet(tr);
   const want = (S === 'paused' || S === 'levelup' || (S === 'guide' && guideFrom === 'paused')) ? 700 : 18000;   // muffle behind menus
   if (AUD.ctx && want !== AUD.lp) { AUD.lp = want; AUD.musicLP.frequency.setTargetAtTime(want, AUD.ctx.currentTime, 0.06); }
@@ -455,6 +477,7 @@ const pX = new Float64Array(PN), pY = new Float64Array(PN), pD = new Float64Arra
 let pCount = 0, pTotal = 0, pLastX = 0, pLastY = 0;
 
 function newRun() {
+  applyMode(modeIdx);
   for (const a of [enemies, bolts, orbs, parts, rings, beams]) for (const o of a) o.active = false;
   maxLen = C.snake.startSegs; newBest = false;
   runT = 0; kills = 0; level = 1; xp = 0; xpNeed = C.xp.base; orbCount = 0; pendingLevels = 0;
@@ -587,7 +610,7 @@ function doShed() {
 
 /* ===================== ENEMIES ===================== */
 // 'difficulty minutes': ramps 0 -> rampTo over the run, so a 2-minute test run still escalates.
-function minuteIdx() { return runT / C.boss.time * C.enemy.rampTo; }
+function minuteIdx() { return runT / (C.run.rampTime || C.boss.time) * C.enemy.rampTo; }
 function spawnEnemy(x, y, isBoss) {
   const e = takeFree(enemies);
   if (!e) return null;
@@ -640,7 +663,7 @@ function updateSpawning(dt) {
     let n = 0; for (const r of rivals) if (r.active) n++;
     if (n < Math.min(C.rival.max, 1 + Math.floor(runT / 40))) spawnRival();
   }
-  if (!bossSpawned && runT >= C.boss.time) spawnBoss();
+  if (C.run.boss && !bossSpawned && runT >= C.boss.time) spawnBoss();
 }
 function updateEnemies(dt) {
   for (let i = 0; i < MAXE; i++) {
@@ -998,12 +1021,12 @@ let newBest = false, maxLen = 0, finalScore = 0, menuSel = 0, endT = 0;
 function endRun(result) {
   if (S === 'win' || S === 'lose') return;
   S = result; menuSel = 0; endT = 0;
-  finalScore = kills * 10 + level * 25 + maxLen * 5 + (result === 'win' ? 1000 : 0);
+  finalScore = kills * 10 + level * 25 + maxLen * 5 + (result === 'win' ? 1000 : 0) + (C.run.boss ? 0 : (runT | 0) * 3);   // endless: survival time counts
   newBest = false;
   if (!autopilot) {                                           // the bot's runs never touch your records
-    save.runs++; if (result === 'win') save.wins++;
+    save.runs++; if (result === 'win') save.wins++; save.modeId = mode().id;
     save.bestKills = Math.max(save.bestKills, kills);
-    if (finalScore > save.bestScore) { save.bestScore = finalScore; newBest = true; }
+    if (finalScore > (save.best[mode().id] || 0)) { save.best[mode().id] = finalScore; newBest = true; }
     writeSave();
   }
   if (result === 'win') sfx('win');
@@ -1090,6 +1113,7 @@ const MX = VW / 2 - 72, MW = 144, MBAR = 74;
 const MENUS = {
   title: () => [
     { label: 'PLAY', act: () => { autopilot = false; newRun(); } },
+    { label: () => 'MODE: ' + mode().name, cycle: d => { applyMode(modeIdx + d); save.modeId = mode().id; writeSave(); } },
     { label: 'HOW TO PLAY', act: () => openGuide('title') },
     { label: 'MUSIC', vol: 'musicVol' },
     { label: 'SOUND FX', vol: 'sfxVol' },
@@ -1119,7 +1143,10 @@ function updateMenu(items, y0) {
   if (took('ArrowDown') || took('KeyS') || took('PadDown')) { menuSel = (menuSel + 1) % n; sfx('move'); }
   if (took('ArrowUp') || took('KeyW') || took('PadUp')) { menuSel = (menuSel + n - 1) % n; sfx('move'); }
   const it = items[menuSel];
-  if (it.vol) {
+  if (it.cycle) {
+    if (took('ArrowLeft') || took('KeyA') || took('PadLeft')) { it.cycle(-1); sfx('move'); }
+    if (took('ArrowRight') || took('KeyD') || took('PadRight') || took('Enter') || took('Space') || took('PadA')) { it.cycle(1); sfx('move'); }
+  } else if (it.vol) {
     if (took('ArrowLeft') || took('KeyA') || took('PadLeft')) adjustVol(it.vol, -1);
     if (took('ArrowRight') || took('KeyD') || took('PadRight') || took('Enter') || took('Space') || took('PadA')) adjustVol(it.vol, 1);
   } else if (took('Enter') || took('Space') || took('PadA')) { sfx('select'); it.act(); return; }
@@ -1128,7 +1155,8 @@ function updateMenu(items, y0) {
       if (!inRow(clicked, i)) continue;
       menuSel = i;
       const c = items[i];
-      if (c.vol) {
+      if (c.cycle) { c.cycle(clicked.x < MX + MW / 4 ? -1 : 1); sfx('move'); }
+      else if (c.vol) {
         if (clicked.x >= MX + MBAR && clicked.x < MX + MBAR + 60) {
           const k = Math.floor((clicked.x - MX - MBAR) / 6) + 1;
           save[c.vol] = save[c.vol] === k ? k - 1 : k; applyVolumes(); writeSave(); sfx('move');
@@ -1144,7 +1172,7 @@ function update(dt) {
     case 'title':
       if (took('KeyB')) { autopilot = true; newRun(); }
       else if (took('KeyH') || took('PadY')) openGuide('title');
-      else updateMenu(MENUS.title(), 50);
+      else updateMenu(MENUS.title(), 42);
       break;
     case 'play':
       if (took('KeyB')) autopilot = !autopilot;
@@ -1357,7 +1385,7 @@ function drawHUD() {
   // next-segment weapon
   const lOk = laserCd <= 0 && segs.length > C.laser.cost;
   text('E:LASER -' + C.laser.cost, 34, VH - 13, lOk ? '#6FF0FF' : COL.dim, 1);
-  if (!bossSpawned) text('BOSS IN ' + fmt(Math.max(0, C.boss.time - runT)), 4, 31, COL.dim, 1);
+  if (C.run.boss && !bossSpawned) text('BOSS IN ' + fmt(Math.max(0, C.boss.time - runT)), 4, 31, COL.dim, 1);
   text('NEXT', VW / 2 + 14, VH - 13, COL.dim, 1);
   drawWeapon(P.weapon, VW / 2 + 38, VH - 11);
   // shed cooldown
@@ -1415,7 +1443,11 @@ function drawMenu(items, y0) {
       const v = save[it.vol];
       for (let k = 0; k < 10; k++) { g.fillStyle = k < v ? (save.muted ? '#555B6A' : col) : '#3a4152'; g.fillRect(MX + MBAR + k * 6, y + 1, 5, 5); }
       if (on) { text('<', MX + MBAR - 7, y, col, 1); text('>', MX + MBAR + 61, y, col, 1); }
-    } else textC(it.label, VW / 2, y, col, 1);
+    } else {
+      const lab = typeof it.label === 'function' ? it.label() : it.label;
+      textC(lab, VW / 2, y, col, 1);
+      if (it.cycle && on) { text('<', MX + 5, y, col, 1); text('>', MX + MW - 9, y, col, 1); }
+    }
   }
 }
 function drawEnd() {
@@ -1423,13 +1455,14 @@ function drawEnd() {
   const win = S === 'win';
   textC(win ? 'VICTORY!' : 'RUN OVER', VW / 2, 10, win ? COL.head : COL.orange, 4);
   textC(win ? 'THE MINI-BOSS IS DEAD' : deathMsg, VW / 2, 36, COL.ui, 1);
+  textC('MODE: ' + mode().name, VW / 2, 43, COL.dim, 1);
   const rows = [['TIME', fmt(runT)], ['KILLS', kills], ['LEVEL', level], ['LONGEST SNAKE', maxLen]];
   for (let i = 0; i < rows.length; i++) { text(rows[i][0], VW / 2 - 60, 50 + i * 9, COL.dim, 1); const v = String(rows[i][1]); text(v, VW / 2 + 60 - textW(v, 1), 50 + i * 9, COL.ui, 1); }
   g.fillStyle = '#3a4152'; g.fillRect(VW / 2 - 60, 87, 120, 1);
   text('SCORE', VW / 2 - 60, 92, COL.head, 1); const sc = String(finalScore); text(sc, VW / 2 + 60 - textW(sc, 2), 90, COL.head, 2);
   if (autopilot) textC('BOT RUN: NOT SAVED', VW / 2, 106, COL.orange, 1);
   else if (newBest) { if (((titleT * 3) | 0) % 2 === 0) textC('NEW BEST SCORE!', VW / 2, 106, COL.orange, 1); }
-  else textC('BEST ' + save.bestScore, VW / 2, 106, COL.dim, 1);
+  else textC('BEST ' + (save.best[mode().id] || 0), VW / 2, 106, COL.dim, 1);
   if (endT > 0.8) drawMenu(MENUS.end(), 118);
 }
 function drawTitle() {
@@ -1444,22 +1477,23 @@ function drawTitle() {
   const name = 'SERPENT SWARM';                              // logo: letters bob in a wave
   for (let i = 0; i < name.length; i++) text(name[i], VW / 2 - textW(name, 4) / 2 + i * 16, 8 + Math.round(Math.sin(titleT * 3 + i * 0.6) * 2), i < 7 ? COL.head : COL.orange, 4);
   textC('YOUR BODY IS THE WEAPON', VW / 2, 34, COL.dim, 1);
-  drawMenu(MENUS.title(), 50);
-  if (!AUD.ctx) { if (((titleT * 2) | 0) % 2 === 0) textC(touch.enabled ? 'TAP ANYWHERE FOR SOUND' : 'PRESS ANY KEY FOR SOUND', VW / 2, 123, COL.orange, 1); }
-  else if (save.runs === 0) textC('NEW HERE? OPEN HOW TO PLAY FIRST', VW / 2, 123, COL.orb, 1);
-  else textC('BEST ' + save.bestScore + '   WINS ' + save.wins + '   RUNS ' + save.runs, VW / 2, 123, COL.dim, 1);
-  if (touch.enabled) textC('DRAG TO STEER. TAP BUTTONS FOR SHED AND LASER.', VW / 2, 134, COL.ui, 1);
+  drawMenu(MENUS.title(), 42);
+  textC(mode().desc, VW / 2, 120, COL.orange, 1);
+  if (!AUD.ctx) { if (((titleT * 2) | 0) % 2 === 0) textC(touch.enabled ? 'TAP ANYWHERE FOR SOUND' : 'PRESS ANY KEY FOR SOUND', VW / 2, 130, COL.orange, 1); }
+  else if (save.runs === 0) textC('NEW HERE? OPEN HOW TO PLAY FIRST', VW / 2, 130, COL.orb, 1);
+  else textC('BEST ' + (save.best[mode().id] || 0) + '   WINS ' + save.wins + '   RUNS ' + save.runs, VW / 2, 130, COL.dim, 1);
+  if (touch.enabled) textC('DRAG TO STEER. TAP BUTTONS FOR SHED AND LASER.', VW / 2, 141, COL.ui, 1);
   else {
-    textC('WASD / ARROWS / STICK: STEER    SPACE: SHED    E: LASER', VW / 2, 134, COL.ui, 1);
-    textC('ESC: PAUSE   M: MUTE   F: FULLSCREEN   H: HELP', VW / 2, 142, COL.dim, 1);
+    textC('WASD / ARROWS / STICK: STEER    SPACE: SHED    E: LASER', VW / 2, 141, COL.ui, 1);
+    textC('ESC: PAUSE   M: MUTE   F: FULLSCREEN   H: HELP', VW / 2, 149, COL.dim, 1);
   }
-  textC('ARENA EDGE, BOSS AND BOSS WALLS ARE DEADLY', VW / 2, 153, COL.orange, 1);
+  textC('ARENA EDGE, BOSS AND BOSS WALLS ARE DEADLY', VW / 2, 157, COL.orange, 1);
   text('V1.0', VW - 20, VH - 7, COL.dim, 1);
 }
 function drawPause() {
   dim(0.7);
   textC('PAUSED', VW / 2, 10, COL.head, 3);
-  textC('TIME ' + fmt(runT) + '   KILLS ' + kills + '   LEVEL ' + level, VW / 2, 32, COL.dim, 1);
+  textC(mode().name + '   TIME ' + fmt(runT) + '   KILLS ' + kills + '   LEVEL ' + level, VW / 2, 32, COL.dim, 1);
   drawMenu(MENUS.paused(), 50);
   if (!touch.enabled) textC('ESC: RESUME   M: MUTE   F: FULLSCREEN', VW / 2, 130, COL.dim, 1);
   textC(touch.enabled ? 'LASER COSTS ' + C.laser.cost + (C.laser.cost === 1 ? ' SEGMENT' : ' SEGMENTS') : 'SPACE: SHED    E: LASER (COSTS ' + C.laser.cost + (C.laser.cost === 1 ? ' SEGMENT)' : ' SEGMENTS)'), VW / 2, 142, COL.ui, 1);
