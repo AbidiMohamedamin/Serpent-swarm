@@ -51,7 +51,7 @@ const CONFIG = {
   },
   shed:   { cooldown: 3, fuse: 1.0, radius: 20, damage: 6, shake: 4 },
   spitter:{ interval: 1.4, range: 80, boltSpeed: 160, damage: 1, boltLife: 0.5, softCap: 8, falloff: 0.8 },
-  laser:  { cost: 2, cooldown: 1.0, length: 220, width: 9, damage: 12, beamLife: 0.25, shake: 3 },  // ACTIVE ability (key E / pad X): sacrifice tail segments for a piercing beam
+  laser:  { cost: 1, cooldown: 1.0, length: 110, width: 9, angle: 30, damage: 12, bossDamage: 35, beamLife: 0.25, shake: 3 },  // ACTIVE ability (key E / pad X): sacrifice tail segments for a piercing beam
   spike:  { hitInterval: 0.5, damage: 1 },
   mace:   { hitInterval: 0.5, damage: 2 },       // 3 Spikes fuse into a Mace
   enemy: {
@@ -65,6 +65,7 @@ const CONFIG = {
     wobble: 8                // sideways wiggle so the swarm doesn't stack
   },
   boss: {
+    spawnMin: 110, spawnMax: 150,                   // boss appears this far (px) from your head
     time: 180, hp: 140, speed: 20, r: 13,          // boss arrives at 3:00 (difficulty ramp scales with this)
     blockEvery: 1.3, blockSize: 10, blockLife: 16, maxBlocks: 40,
     touchCooldown: 1.2, freeze: 0.1,
@@ -76,7 +77,10 @@ const CONFIG = {
   },
   rival: {                                      // enemy snakes: hunt your head, die to any weapon, drop lots of orbs
     first: 15, every: 14, max: 4,               // first spawn (s), spawn interval (s), max alive (also capped by 1 + runTime/40)
-    len: 8, hp: 24, speed: 52, turnRate: 95,    // slower and clumsier than you, so they can be out-turned
+    eatR: 7, eatChase: 60, eatCap: 40,              // rival heads eat orbs and chase nearby ones; you get them all back when she dies
+    eatPerSeg: 3, maxLen: 20, growHp: 6,            // every 3 orbs eaten she grows 1 segment (up to maxLen) and gains growHp health
+    laserOnly: true,                                // ONLY THE LASER HURTS RIVALS (bolts, spikes and shed bounce off)
+    len: 8, hp: 14, speed: 52, turnRate: 95,    // slower and clumsier than you, so they can be out-turned
     spacing: 6, headDamage: 2, bodyDamage: 1,   // segments you lose when you touch their head / body
     recoil: 1.0, edgeMargin: 36                 // after biting they back off for this long; they steer away from the edge
   },
@@ -395,7 +399,7 @@ let toastT = 0, toastMsg = '';
 function toast(m) { toastMsg = m; toastT = 1.5; }
 
 /* ===================== POOLS + SPATIAL HASH ===================== */
-const MAXE = C.enemy.maxActive + 8 + C.rival.max * C.rival.len;
+const MAXE = C.enemy.maxActive + 8 + C.rival.max * C.rival.maxLen;
 const enemies = [];
 for (let i = 0; i < MAXE; i++) enemies.push({ active:false, boss:false, x:0, y:0, hp:1, maxHp:1, r:4, speed:0,
   flash:0, spikeT:0, atk:0, touchCd:0, blockT:0, ph:0, tele:0, tx:0, ty:0, tpT:0, owner:-1, seg:0 });
@@ -404,10 +408,10 @@ for (let i = 0; i < C.pools.bolts; i++) bolts.push({ active:false, x:0, y:0, vx:
 for (let i = 0; i < C.pools.orbs; i++) orbs.push({ active:false, x:0, y:0 });
 for (let i = 0; i < C.pools.particles; i++) parts.push({ active:false, x:0, y:0, vx:0, vy:0, life:0, max:1, color:'#fff', size:1 });
 for (let i = 0; i < C.pools.rings; i++) rings.push({ active:false, x:0, y:0, r:0, grow:0, life:0, max:1, color:'#fff' });
-for (let i = 0; i < C.pools.beams; i++) beams.push({ active:false, x1:0, y1:0, x2:0, y2:0, life:0, w:3 });
+for (let i = 0; i < C.pools.beams; i++) beams.push({ active:false, x1:0, y1:0, x2:0, y2:0, life:0, w:3, ang:0 });
 
 const rivals = [];                                      // enemy snakes; their segments live in the enemy pool (owner = rival index)
-for (let i = 0; i < C.rival.max; i++) rivals.push({ active: false, idx: [], hp: 0, maxHp: 0, ang: 0, recoil: 0 });
+for (let i = 0; i < C.rival.max; i++) rivals.push({ active: false, idx: [], hp: 0, maxHp: 0, ang: 0, recoil: 0, eaten: 0 });
 function takeFree(pool) { for (let i = 0; i < pool.length; i++) if (!pool[i].active) return pool[i]; return null; }
 
 // Spatial hash for ENEMIES (rebuilt every tick). Linked lists in typed arrays => zero allocation.
@@ -624,8 +628,15 @@ function spawnPack() {
 }
 function spawnBoss() {
   bossSpawned = true; sfx('boss');
-  spawnPoint();
-  boss = spawnEnemy(sp.x, sp.y, true);
+  let bx = AW / 2, by = AH / 2, bs = 1e9;                // spawn at a medium distance: in the fight quickly, but never on top of the snake
+  for (let t = 0; t < 40; t++) {
+    const ang = rnd() * TAU, d = C.boss.spawnMin + rnd() * (C.boss.spawnMax - C.boss.spawnMin);
+    const x = clamp(head.x + Math.cos(ang) * d, 30, AW - 30), y = clamp(head.y + Math.sin(ang) * d, 30, AH - 30);
+    const real = Math.hypot(x - head.x, y - head.y);
+    const score = real < C.boss.spawnMin * 0.8 ? 1e6 + (C.boss.spawnMin - real) : Math.abs(real - (C.boss.spawnMin + C.boss.spawnMax) / 2);
+    if (score < bs) { bs = score; bx = x; by = y; }
+  }
+  boss = spawnEnemy(bx, by, true);
   bannerT = 3;
 }
 function updateSpawning(dt) {
@@ -689,8 +700,18 @@ function spawnRival() {
     r.idx.push(k);
   }
   r.hp = r.maxHp = C.rival.hp * (1 + C.enemy.hpPerMinute * minuteIdx());
-  r.ang = ang; r.recoil = 0; r.active = true;
+  r.ang = ang; r.recoil = 0; r.eaten = 0; r.active = true;
   rivalBannerT = 2.5; sfx('rival');
+}
+function growRival(r) {                                    // an eating rival gets longer (and tougher)
+  if (r.idx.length >= C.rival.maxLen) return;
+  const k = freeEnemyIndex();
+  if (k < 0) return;
+  const last = enemies[r.idx[r.idx.length - 1]], e = enemies[k];
+  e.active = true; e.boss = false; e.owner = rivals.indexOf(r); e.seg = r.idx.length; e.hp = e.maxHp = 1; e.speed = 0; e.r = 3.5;
+  e.x = last.x; e.y = last.y; e.flash = 0; e.spikeT = 0; e.atk = 0; e.touchCd = 0; e.tele = 0;
+  r.idx.push(k); r.maxHp += C.rival.growHp; r.hp += C.rival.growHp;
+  spawnRing(last.x, last.y, 2, 14, 0.25, COL.rivalHead);
 }
 function updateRivals(dt) {
   const dtr = rad(C.rival.turnRate) * dt, sp2 = C.rival.spacing;
@@ -701,11 +722,27 @@ function updateRivals(dt) {
     if (r.recoil > 0) { r.recoil -= dt; want = Math.atan2(h.y - head.y, h.x - head.x); }       // back off after a bite
     else if (h.x < C.rival.edgeMargin || h.x > AW - C.rival.edgeMargin || h.y < C.rival.edgeMargin || h.y > AH - C.rival.edgeMargin)
       want = Math.atan2(AH / 2 - h.y, AW / 2 - h.x);                                               // stay off the walls
-    else want = Math.atan2(head.y - h.y, head.x - h.x);                                            // hunt the player's head
+    else {
+      want = Math.atan2(head.y - h.y, head.x - h.x);                                               // hunt the player's head...
+      if (Math.hypot(head.x - h.x, head.y - h.y) > 70) {                                           // ...but grab nearby orbs on the way
+        let bo = null, bd = C.rival.eatChase * C.rival.eatChase;
+        for (const o of orbs) { if (!o.active) continue; const dx = o.x - h.x, dy = o.y - h.y, d2 = dx * dx + dy * dy; if (d2 < bd) { bd = d2; bo = o; } }
+        if (bo) want = Math.atan2(bo.y - h.y, bo.x - h.x);
+      }
+    }
     r.ang += clamp(angDiff(r.ang, want), -dtr, dtr);                                               // limited turn rate => can be dodged
     h.x = clamp(h.x + Math.cos(r.ang) * C.rival.speed * dt, 4, AW - 4);
     h.y = clamp(h.y + Math.sin(r.ang) * C.rival.speed * dt, 4, AH - 4);
     h.atk = Math.hypot(head.x - h.x, head.y - h.y) < 16 ? 0.12 : 0;
+    for (const o of orbs) {                                                                         // the rival's head EATS orbs (you get them back when you kill her)
+      if (!o.active) continue;
+      const dx = o.x - h.x, dy = o.y - h.y;
+      if (dx * dx + dy * dy < C.rival.eatR * C.rival.eatR) {
+        o.active = false; r.eaten = Math.min(C.rival.eatCap, r.eaten + 1);
+        spawnRing(h.x, h.y, 2, 10, 0.2, COL.orb);
+        if (r.eaten % C.rival.eatPerSeg === 0) growRival(r);
+      }
+    }
     for (let i = 1; i < r.idx.length; i++) {                                                        // each segment trails the one ahead
       const a = enemies[r.idx[i - 1]], b = enemies[r.idx[i]];
       const dx = a.x - b.x, dy = a.y - b.y, d = Math.hypot(dx, dy) || 1;
@@ -723,13 +760,28 @@ function killRival(r) {
     if (o) { o.active = true; o.x = e.x; o.y = e.y; } else gainOrb(C.orb.value + P.orb);
   }
   const h = enemies[r.idx[0]];
+  for (let i = 0; i < r.eaten; i++) {                                                               // everything she ate comes back, scattered
+    const o = takeFree(orbs), a = rnd() * TAU, d = 4 + rnd() * 16;
+    if (o) { o.active = true; o.x = clamp(h.x + Math.cos(a) * d, 4, AW - 4); o.y = clamp(h.y + Math.sin(a) * d, 4, AH - 4); } else gainOrb(C.orb.value + P.orb);
+  }
+  r.eaten = 0;
   spawnRing(h.x, h.y, 3, 26, 0.35, COL.rivalHead);
   shake = Math.max(shake, 2);
 }
 // Boss teleport: pick a landing spot near the head, show an orange ring there, then jump + shockwave.
 function bossStartTeleport(e) {
-  const a = rnd() * TAU, d = C.boss.teleMin + rnd() * (C.boss.teleMax - C.boss.teleMin);
-  e.tx = clamp(head.x + Math.cos(a) * d, 20, AW - 20); e.ty = clamp(head.y + Math.sin(a) * d, 20, AH - 20);
+  // landing spot: near the head but never on it, and never where the head will be when the ring fires
+  const lead = Math.min(1, C.boss.telegraph) * C.snake.speed * (1 + P.speed);
+  const hx = head.x + Math.cos(head.ang) * lead, hy = head.y + Math.sin(head.ang) * lead;
+  const safe = C.boss.slamRadius + C.snake.headR + 22;
+  let bestD = -1;
+  for (let t = 0; t < 24; t++) {
+    const a = rnd() * TAU, d = C.boss.teleMin + rnd() * (C.boss.teleMax - C.boss.teleMin);
+    const x = clamp(head.x + Math.cos(a) * d, 20, AW - 20), y = clamp(head.y + Math.sin(a) * d, 20, AH - 20);
+    const m = Math.min(Math.hypot(x - head.x, y - head.y), Math.hypot(x - hx, y - hy));
+    if (m > bestD) { bestD = m; e.tx = x; e.ty = y; }
+    if (m >= safe) break;
+  }
   e.tele = C.boss.telegraph; e.tpT = C.boss.teleportEvery + C.boss.telegraph; sfx('tele');
 }
 function bossLand(e) {
@@ -741,9 +793,10 @@ function bossLand(e) {
   const dx = head.x - e.x, dy = head.y - e.y, rr = C.boss.slamRadius + C.snake.headR;
   if (dx * dx + dy * dy < rr * rr) { if (C.boss.lethal) killHead('THE BOSS LANDED ON YOU'); else hurtHead(C.boss.slamDamage, C.boss.hitInvuln, true); }
 }
-function damageEnemy(e, dmg) {
+function damageEnemy(e, dmg, fromLaser) {
   if (e.owner >= 0) {                                    // a rival-snake segment: damage the whole snake's shared health
     const r = rivals[e.owner];
+    if (C.rival.laserOnly && !fromLaser) { if (e.flash <= 0) { e.flash = 0.05; burst(e.x, e.y, 1, '#9aa3b8', 30, 0.15); } return; }   // armoured: only the laser gets through
     r.hp -= dmg;
     for (const k of r.idx) enemies[k].flash = C.fx.hitFlash;
     if (r.hp <= 0) killRival(r);
@@ -800,16 +853,20 @@ function doLaser() {
   const L = C.laser.length, ux = Math.cos(head.ang), uy = Math.sin(head.ang);
   const x1 = head.x + ux * 5, y1 = head.y + uy * 5;
   const bm = takeFree(beams);
-  if (bm) { bm.active = true; bm.x1 = x1; bm.y1 = y1; bm.x2 = x1 + ux * L; bm.y2 = y1 + uy * L; bm.life = C.laser.beamLife; bm.w = C.laser.width; }
+  if (bm) { bm.active = true; bm.x1 = x1; bm.y1 = y1; bm.x2 = x1 + ux * L; bm.y2 = y1 + uy * L; bm.life = C.laser.beamLife; bm.w = C.laser.width; bm.ang = head.ang; }
   shake = Math.max(shake, C.laser.shake);
-  const n = hashQuery(x1 + ux * L / 2, y1 + uy * L / 2, L / 2 + 12);
-  const hw = C.laser.width / 2;
-  for (let k = 0; k < n; k++) {                            // piercing: everything along the line
+  const n = hashQuery(x1 + ux * L / 2, y1 + uy * L / 2, L / 2 + L * Math.tan(rad(C.laser.angle / 2)) + 14);
+  const hw = C.laser.width / 2, tn = Math.tan(rad(C.laser.angle / 2));
+  const hitOwner = [];
+  for (let k = 0; k < n; k++) {                            // piercing CONE: everything inside the wedge in front of the head
     const e = enemies[qBuf[k]];
     if (!e.active) continue;
-    const tt = clamp((e.x - x1) * ux + (e.y - y1) * uy, 0, L);
-    const px = x1 + ux * tt - e.x, py = y1 + uy * tt - e.y, rr = hw + e.r;
-    if (px * px + py * py < rr * rr) damageEnemy(e, C.laser.damage);
+    const dx = e.x - x1, dy = e.y - y1, along = dx * ux + dy * uy;
+    if (along < -e.r || along > L + e.r) continue;
+    const side = Math.abs(-dx * uy + dy * ux), a = Math.max(0, along);
+    if (side <= hw * 0.5 + a * tn + e.r) {
+      if (e.owner >= 0) { if (hitOwner[e.owner]) continue; hitOwner[e.owner] = true; }   // a rival takes ONE laser hit per shot, however many segments are in the cone
+      damageEnemy(e, e.boss ? C.laser.bossDamage : C.laser.damage, true); if (e.boss) { spawnRing(e.x, e.y, 6, 22, 0.25, '#6FF0FF'); burst(e.x, e.y, 8, '#6FF0FF', 70, 0.35); } }
   }
 }
 function updateWeapons(dt) {
@@ -942,9 +999,9 @@ function gainOrb(v) {
 }
 // Levels without a card choice show a short non-blocking tip instead (beginner explainer).
 const TIPS = [
-  ['RED RIVAL SNAKES HUNT YOUR HEAD. SHOOT OR SPIKE THEM', 'TO KILL THEM. THEY DROP LOTS OF ORBS.'],
+  ['RED RIVAL SNAKES ARE ARMOURED: BOLTS AND SPIKES BOUNCE OFF.', 'ONLY THE LASER (E) KILLS THEM. THEY EAT ORBS AND GROW LONGER.'],
   ['SPIKES HURT ENEMIES THAT TOUCH THEM.', 'KEEP THEM FACING THE SWARM.'],
-  ['PRESS E (OR X) TO SACRIFICE 2 SEGMENTS FOR A HUGE', 'PIERCING LASER IN THE DIRECTION YOU FACE.'],
+  ['PRESS E (OR X) TO SACRIFICE 1 SEGMENT FOR A HUGE', 'LASER CONE IN THE DIRECTION YOU FACE.'],
   ['PRESS SPACE TO SHED YOUR TAIL. THE PIECES EXPLODE', 'AFTER 1 SECOND AND HURT ENEMIES AROUND THEM.'],
   ['3 SPIKES IN A ROW FUSE INTO A MACE (2X DAMAGE).', 'MIX SPITTERS AND SPIKES TO CONTROL FUSING.'],
   ['BITING YOUR OWN BODY LOCKS YOUR STEERING BRIEFLY.', 'TOUCHING THE ORANGE ARENA EDGE KILLS YOU. STAY INSIDE.'],
@@ -1297,6 +1354,10 @@ function drawWorld() {
     if (e.boss) {
       box(e.x, e.y, 25, 25, col);
       g.fillStyle = COL.dark; g.fillRect(R(e.x) - 7, R(e.y) - 5, 4, 4); g.fillRect(R(e.x) + 4, R(e.y) - 5, 4, 4);
+      const hb = 30, hx0 = R(e.x) - (hb >> 1), hy0 = R(e.y) - 21, hf = clamp(e.hp / e.maxHp, 0, 1);   // health bar over the boss's head
+      g.fillStyle = COL.dark; g.fillRect(hx0 - 1, hy0 - 1, hb + 2, 6);
+      g.fillStyle = '#3a2a2e'; g.fillRect(hx0, hy0, hb, 4);
+      g.fillStyle = e.flash > 0 ? '#FFFFFF' : hf > 0.5 ? '#C8505F' : hf > 0.25 ? COL.orange : '#FF3B3B'; g.fillRect(hx0, hy0, R(hb * hf), 4);
     } else if (e.owner >= 0 && e.seg === 0) {
       box(e.x, e.y, 7, 7, col);
       const r = rivals[e.owner], dx = Math.cos(r.ang), dy = Math.sin(r.ang);
@@ -1314,11 +1375,23 @@ function drawWorld() {
   for (const b of bolts) if (b.active) box(b.x, b.y, 2, 2, '#D9FF8A');
   for (const bm of beams) {
     if (!bm.active) continue;
-    const L = Math.hypot(bm.x2 - bm.x1, bm.y2 - bm.y1), n = (L / 2) | 0;
-    const w = Math.max(2, R(bm.w * clamp(bm.life / C.laser.beamLife, 0, 1))), wi = Math.max(1, (w / 3) | 0);
-    for (let pass = 0; pass < 2; pass++) {
-      const ww = pass ? wi : w; g.fillStyle = pass ? '#FFFFFF' : '#6FF0FF';
-      for (let i = 0; i <= n; i++) g.fillRect(R(bm.x1 + (bm.x2 - bm.x1) * i / n) - (ww >> 1), R(bm.y1 + (bm.y2 - bm.y1) * i / n) - (ww >> 1), ww, ww);
+    const L = Math.hypot(bm.x2 - bm.x1, bm.y2 - bm.y1), n = (L / 2) | 0, f = clamp(bm.life / C.laser.beamLife, 0, 1);
+    const ux = Math.cos(bm.ang), uy = Math.sin(bm.ang), tn = Math.tan(rad(C.laser.angle / 2)), h0 = bm.w * 0.25;
+    const hwAt = d => (h0 + d * tn) * (0.4 + 0.6 * f);                   // half-width of the cone at distance d
+    g.fillStyle = 'rgba(111,240,255,' + (0.18 + 0.32 * f).toFixed(2) + ')';   // translucent fan
+    g.beginPath();
+    g.moveTo(bm.x1 - uy * h0, bm.y1 + ux * h0);
+    g.lineTo(bm.x1 + ux * L - uy * hwAt(L), bm.y1 + uy * L + ux * hwAt(L));
+    g.lineTo(bm.x1 + ux * L + uy * hwAt(L), bm.y1 + uy * L - ux * hwAt(L));
+    g.lineTo(bm.x1 + uy * h0, bm.y1 - ux * h0);
+    g.closePath(); g.fill();
+    for (let pass = 0; pass < 2; pass++) {                              // bright edges + white core
+      g.fillStyle = pass ? '#FFFFFF' : '#6FF0FF';
+      for (let i = 0; i <= n; i++) {
+        const d = L * i / n, cx = bm.x1 + ux * d, cy = bm.y1 + uy * d;
+        if (pass) g.fillRect(R(cx), R(cy), 2, 2);
+        else for (const sgn of [-1, 1]) g.fillRect(R(cx - uy * hwAt(d) * sgn), R(cy + ux * hwAt(d) * sgn), 1, 1);
+      }
     }
   }
   // snake: tail first, head last so the head is always on top
@@ -1566,7 +1639,7 @@ function demoFusion(t) {
 function demoLaser(t) {
   t %= 5; const y = 79, hx = 150, fire = 1.4;
   for (let i = 0; i < 6; i++) {
-    if (t >= fire && i >= 4) continue;
+    if (t >= fire && i >= 6 - C.laser.cost) continue;
     drawWeapon(i % 2 ? 'spike' : 'spitter', hx - 8 * (i + 1), y);
   }
   if (t >= fire && t < fire + 0.5) {
@@ -1577,12 +1650,14 @@ function demoLaser(t) {
   const xs = [190, 212, 234, 256, 278];
   for (const x of xs) if (t < fire + 0.35) gEnemy(x, y + ((x / 22) | 0) % 3 * 3 - 3, t >= fire && t < fire + 0.35);
   if (t >= fire && t < fire + 0.25) {
-    const w = R(9 * (1 - (t - fire) / 0.25)) + 2;
-    g.fillStyle = '#6FF0FF'; g.fillRect(hx + 5, y - (w >> 1), 150, w);
-    g.fillStyle = '#FFFFFF'; g.fillRect(hx + 5, y - 1, 150, 3);
+    const f = 1 - (t - fire) / 0.25, tn = Math.tan(rad(C.laser.angle / 2)), Ld = C.laser.length;
+    g.fillStyle = 'rgba(111,240,255,' + (0.2 + 0.35 * f).toFixed(2) + ')';
+    g.beginPath(); g.moveTo(hx + 5, y - 2); g.lineTo(hx + 5 + Ld, y - 2 - Ld * tn * f); g.lineTo(hx + 5 + Ld, y + 2 + Ld * tn * f); g.lineTo(hx + 5, y + 2); g.closePath(); g.fill();
+    g.fillStyle = '#6FF0FF'; for (let i = 0; i < Ld; i += 2) { const o = (2 + i * tn) * f; g.fillRect(hx + 5 + i, R(y - o), 1, 1); g.fillRect(hx + 5 + i, R(y + o), 1, 1); }
+    g.fillStyle = '#FFFFFF'; g.fillRect(hx + 5, y - 1, Ld, 3);
   }
   gKey('E', 30, 58, t >= fire && t < fire + 0.3);
-  if (t >= fire) gFloat('-2 SEGMENTS', 70, 96, '#6FF0FF');
+  if (t >= fire) gFloat('-' + C.laser.cost + (C.laser.cost === 1 ? ' SEGMENT' : ' SEGMENTS'), 70, 96, '#6FF0FF');
   gFloat('KEEP AT LEAST 1', 70, 106, COL.dim);
   if (t < fire) gFloat('AIM WITH YOUR HEAD', 100, 52, COL.dim);
 }
@@ -1657,25 +1732,30 @@ function demoBoss(t) {
   else gFloat('BOSS WALKS, THEN BLINKS', 160, 46, COL.dim);
 }
 function demoRival(t) {
-  t %= 4.8; const y = 79, hx = 250 - 28 * Math.min(t, 3.4);
+  t %= 5.2; const y = 79, hx = 250 - 22 * Math.min(t, 3.0), laserT = 2.6;
   gHead(96, y); for (let i = 0; i < 5; i++) drawWeapon(i % 2 ? 'spike' : 'spitter', 88 - 8 * i, y);
-  const shots = [1.4, 1.9, 2.4, 2.9];
-  const hit = shots.some(s => t >= s + 0.3 && t < s + 0.4);
-  if (t < 3.4) {
-    for (let i = 7; i >= 0; i--) {
-      const yy = y + Math.sin(t * 4 - i * 0.7) * 7, xx = hx + i * 7;
-      box(xx, yy, i ? 5 : 7, i ? 5 : 7, hit ? '#FFFFFF' : i ? COL.rival : COL.rivalHead);
+  const shots = [0.8, 1.3, 1.8];
+  if (t < laserT + 0.2) {
+    for (let i = 9; i >= 0; i--) {                                    // rival: 10 segments (it has been eating)
+      const yy = y + Math.sin(t * 4 - i * 0.7) * 6, xx = hx + i * 7, fl = t >= laserT && t < laserT + 0.2;
+      box(xx, yy, i ? 5 : 7, i ? 5 : 7, fl ? '#FFFFFF' : i ? COL.rival : COL.rivalHead);
     }
-    g.fillStyle = COL.dark; g.fillRect(R(hx) - 20, y - 25, 42, 5);
-    g.fillStyle = '#3a2a2e'; g.fillRect(R(hx) - 19, y - 24, 40, 3);
-    g.fillStyle = '#C8505F'; g.fillRect(R(hx) - 19, y - 24, R(40 * clamp(1 - (shots.filter(s => t >= s + 0.3).length) / 4, 0, 1)), 3);
-    for (const s of shots) if (t >= s && t < s + 0.3) box(lerp(96, 250 - 28 * (s + 0.3), (t - s) / 0.3), y, 2, 2, '#D9FF8A');
+    for (const sh of shots) {                                          // bolts bounce off
+      if (t >= sh && t < sh + 0.35) { const f = (t - sh) / 0.35, bx = f < 0.7 ? lerp(96, hx - 4, f / 0.7) : hx - 4 + (f - 0.7) * 40; box(bx, y - (f > 0.7 ? (f - 0.7) * 30 : 0), 2, 2, f > 0.7 ? '#9aa3b8' : '#D9FF8A'); }
+    }
+    if (t < laserT) gFloat('BOLTS BOUNCE OFF', hx + 10, y + 20, COL.dim);
+    if (t >= laserT - 0.4 && t < laserT) gFloat('E!', 110, y - 14, '#6FF0FF');
+    if (t >= laserT) {                                                 // laser cone
+      const f = 1 - (t - laserT) / 0.2, tn = Math.tan(rad(C.laser.angle / 2)), Ld = 150;
+      g.fillStyle = 'rgba(111,240,255,' + (0.2 + 0.35 * f).toFixed(2) + ')';
+      g.beginPath(); g.moveTo(101, y - 2); g.lineTo(101 + Ld, y - 2 - Ld * tn); g.lineTo(101 + Ld, y + 2 + Ld * tn); g.lineTo(101, y + 2); g.closePath(); g.fill();
+    }
+    gFloat('RIVAL SNAKE', hx + 10, y - 20, COL.rivalHead);
   } else {
-    for (let i = 0; i < 8; i++) box(hx + i * 7, y + Math.sin(i) * 6, 3, 3, COL.orb);
-    gFloat('LOTS OF ORBS!', hx + 24, y - 20, COL.head);
+    for (let i = 0; i < 12; i++) box(hx + i * 5, y + Math.sin(i) * 7, 3, 3, COL.orb);
+    gFloat('ALL ITS ORBS DROP!', hx + 10, y - 20, COL.head);
   }
-  gFloat('TOUCH IT: -1 SEGMENT (HEAD: -2)', 160, 46, COL.orange);
-  if (t < 3.4) gFloat('RIVAL SNAKE', hx, y + 20, COL.rivalHead);
+  gFloat('ONLY THE LASER KILLS IT. IT EATS ORBS AND GROWS.', 160, 46, COL.orange);
 }
 const GUIDE = [
   { title: 'STEERING', demo: demoSteer, lines: ['WASD, ARROWS OR LEFT STICK STEER THE HEAD.', 'IT TURNS AT A FIXED RATE, SO A LONG BODY', 'CANNOT TURN ON THE SPOT. PLAN YOUR CURVES.'] },
@@ -1683,9 +1763,9 @@ const GUIDE = [
   { title: 'SPITTER', demo: demoSpitter, lines: ['LIME SQUARE. SHOOTS A BOLT AT THE NEAREST', 'ENEMY INSIDE ITS RANGE RING.', 'SLOW FIRE, SHORT-LIVED BOLTS.'] },
   { title: 'SPIKE', demo: demoSpike, lines: ['AMBER DIAMOND. HURTS ANY ENEMY TOUCHING IT,', 'AT MOST ONCE EVERY HALF SECOND PER ENEMY.', 'GREAT WHEN THE SWARM CLOSES IN.'] },
   { title: 'FUSION', demo: demoFusion, lines: ['THREE SPIKES IN A ROW AT THE TAIL MERGE INTO A MACE.', 'THE MACE HITS TWICE AS HARD AND FREES 2 SLOTS.', 'MIX SPITTERS AND SPIKES TO CONTROL WHEN YOU FUSE.'] },
-  { title: 'LASER (ACTIVE)', demo: demoLaser, lines: [() => 'PRESS E OR X: SACRIFICE THE LAST ' + C.laser.cost + ' SEGMENTS.', 'A HUGE BEAM PIERCES EVERY ENEMY IN FRONT OF THE HEAD.', 'YOU KEEP AT LEAST 1 SEGMENT. GREAT IN AN EMERGENCY.'] },
+  { title: 'LASER (ACTIVE)', demo: demoLaser, lines: [() => 'PRESS E OR X: SACRIFICE THE LAST ' + (C.laser.cost === 1 ? 'SEGMENT.' : C.laser.cost + ' SEGMENTS.'), () => 'A ' + C.laser.angle + ' DEGREE CONE BLASTS EVERY ENEMY IN FRONT. BOSS TAKES HEAVY DAMAGE.', 'YOU KEEP AT LEAST 1 SEGMENT. GREAT IN AN EMERGENCY.'] },
   { title: 'SHED', demo: demoShed, lines: ['PRESS SPACE OR A TO DROP THE LAST THIRD OF YOUR BODY.', 'THE PIECES FLASH, THEN EXPLODE AFTER 1 SECOND.', 'COOLDOWN 3 SECONDS. GOOD FOR ESCAPING A CROWD.'] },
-  { title: 'RIVAL SNAKES', demo: demoRival, lines: ['RED RIVAL SNAKES HUNT YOUR HEAD. THEY ARE SLOWER AND', 'TURN WIDER THAN YOU, SO YOU CAN OUT-MANOEUVRE THEM.', 'TOUCH ONE: LOSE 1 SEGMENT (ITS HEAD: 2). KILL IT FOR ORBS.'] },
+  { title: 'RIVAL SNAKES', demo: demoRival, lines: ['RED RIVAL SNAKES HUNT YOUR HEAD. THEY ARE SLOWER THAN YOU.', 'ARMOURED: ONLY THE LASER HURTS THEM. THEY EAT ORBS AND GROW.', 'KILL ONE TO GET EVERY ORB IT ATE BACK. TOUCHING ONE COSTS SEGMENTS.'] },
   { title: 'DANGERS', demo: demoDanger, lines: ['AN ENEMY TOUCHING YOUR HEAD COSTS A TAIL SEGMENT.', 'BITING YOUR OWN BODY LOCKS YOUR STEERING BRIEFLY.', 'NO SEGMENTS LEFT = RUN OVER. THE ORANGE ARENA EDGE KILLS!'] },
   { title: 'LEVEL UPS', demo: demoCards, lines: [() => 'EVERY ' + C.xp.cardEvery + ' LEVELS YOU PICK 1 OF 3 CARDS.', 'SPITTER / SPIKE CARDS SET THE TYPE OF NEW SEGMENTS.', 'OTHER LEVELS SHOW A QUICK TIP. CARDS EXPLAIN THEMSELVES.'] },
   { title: 'THE BOSS', demo: demoBoss, lines: [() => 'AT ' + fmt(C.boss.time) + ' A MINI-BOSS APPEARS. KILL IT TO WIN THE RUN.', 'IT TELEPORTS NEAR YOU: AN ORANGE RING MARKS THE LANDING.', 'DEFEAT: IT TOUCHES YOUR HEAD, ITS LANDING HITS YOU, OR YOU TOUCH A WALL.'] }
@@ -1783,7 +1863,7 @@ function autopilotThink() {
         const e = enemies[i];
         if (!e.active) continue;
         const dx = e.x - hx, dy = e.y - hy, along = dx * dirx + dy * diry;
-        if (along > 0 && along < C.laser.length && Math.abs(-dx * diry + dy * dirx) < C.laser.width / 2 + e.r) c += e.boss ? 8 : 1;
+        if (along > 0 && along < C.laser.length && Math.abs(-dx * diry + dy * dirx) < C.laser.width / 4 + along * Math.tan(rad(C.laser.angle / 2)) + e.r) c += e.boss ? 8 : e.owner >= 0 ? 2 : 1;
       }
       if (c >= 6) doLaser();
     }
