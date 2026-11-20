@@ -1,0 +1,1859 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="screen-orientation" content="landscape">
+<title>Serpent Swarm</title>
+<meta name="description" content="Serpent Swarm: a pixel survival game where your snake's body is made of auto-firing weapons. Survive the swarm, beat the boss.">
+<meta name="theme-color" content="#0b0e16">
+<meta property="og:title" content="Serpent Swarm">
+<meta property="og:description" content="A pixel survival game where every segment of your snake is a weapon.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230b0e16'/%3E%3Crect x='2' y='9' width='4' height='4' fill='%23B7F34A'/%3E%3Crect x='6' y='7' width='4' height='4' fill='%23B7F34A'/%3E%3Crect x='10' y='4' width='4' height='4' fill='%23FFD84A'/%3E%3C/svg%3E">
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;overscroll-behavior:none}
+  canvas{display:block;width:100vw;height:100vh;height:100dvh;cursor:default;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;outline:none}
+  noscript{color:#fff;font:16px monospace;position:fixed;top:20px;left:20px}
+</style>
+</head>
+<body>
+<noscript>Serpent Swarm needs JavaScript enabled.</noscript>
+<canvas id="screen" tabindex="0"></canvas>
+<script>
+'use strict';
+/* =====================================================================
+   SERPENT SWARM - prototype
+   Sections: CONFIG / UTIL+CANVAS / INPUT / POOLS+HASH / SNAKE / ENEMIES /
+             WEAPONS / COLLISION / PROGRESSION / UI / GAME LOOP
+   ===================================================================== */
+
+/* ===================== CONFIG (tweak feel here) ===================== */
+const CONFIG = {
+  view:   { w: 320, h: 180 },          // virtual resolution
+  arena:  { w: 960, h: 540, lethalBorder: true },   // lethalBorder: head touching the arena edge = defeat
+  camera: { follow: 5 },               // higher = snappier camera
+  snake: {
+    speed: 70,            // px/s, constant
+    turnRate: 240,        // deg/s max
+    spacing: 6,           // px between segments along the path
+    startSegs: 5,
+    maxSegs: Infinity,   // no length limit (set a number, e.g. 20, to cap it)
+    headR: 3.5, segR: 3,
+    hitInvuln: 0.5,       // s of invulnerability after an enemy hit
+    stunTime: 0.3,        // s you can't steer after biting your own body
+    stunSpeed: 0.5,       // speed multiplier while stunned (never 0: freezing felt like input lag)
+    stunGrace: 0.5,       // extra s before you can be stunned again
+    selfSkip: 4,          // first N segments can't be bitten (the "neck")
+    orbsPerSeg: 4,
+    passiveSpeed: 0.10, passiveTurn: 0.15
+  },
+  shed:   { cooldown: 3, fuse: 1.0, radius: 20, damage: 6, shake: 4 },
+  spitter:{ interval: 1.4, range: 80, boltSpeed: 160, damage: 1, boltLife: 0.5, softCap: 8, falloff: 0.8 },
+  laser:  { cost: 2, cooldown: 1.0, length: 220, width: 9, damage: 12, beamLife: 0.25, shake: 3 },  // ACTIVE ability (key E / pad X): sacrifice tail segments for a piercing beam
+  spike:  { hitInterval: 0.5, damage: 1 },
+  mace:   { hitInterval: 0.5, damage: 2 },       // 3 Spikes fuse into a Mace
+  enemy: {
+    swarmerHp: 2, swarmerSpeed: 44, swarmerR: 4, speedJitter: 0.15,
+    maxActive: 450,
+    hpPerMinute: 0.35,       // +50% hp per 'difficulty minute'
+    rampTo: 1.8,               // difficulty minutes reached when the boss arrives (run length independent)
+    spawnBase: 3.2, spawnDropPerMin: 0.9, spawnMin: 0.6,   // seconds between packs
+    packBase: 2, packPerMin: 3.5,
+    spawnDist: 196,          // ring radius around camera (just outside the view)
+    wobble: 8                // sideways wiggle so the swarm doesn't stack
+  },
+  boss: {
+    time: 180, hp: 140, speed: 20, r: 13,          // boss arrives at 3:00 (difficulty ramp scales with this)
+    blockEvery: 1.3, blockSize: 10, blockLife: 16, maxBlocks: 40,
+    touchCooldown: 1.2, freeze: 0.1,
+    lethal: true, wallsLethal: true,                 // DEFEAT rules: boss touching your head, or your head touching a boss wall (set false for the softer damage rules below)
+    hitInvuln: 1.5,                                 // invulnerability after a boss hit (longer than a normal bite)
+    touchDamage: 3,                                 // segments lost when touching the boss
+    teleportEvery: 3.2, telegraph: 0.9,              // boss blinks to a new spot near you; orange ring shows where
+    teleMin: 50, teleMax: 85, slamRadius: 26, slamDamage: 2
+  },
+  rival: {                                      // enemy snakes: hunt your head, die to any weapon, drop lots of orbs
+    first: 15, every: 14, max: 4,               // first spawn (s), spawn interval (s), max alive (also capped by 1 + runTime/40)
+    len: 8, hp: 24, speed: 52, turnRate: 95,    // slower and clumsier than you, so they can be out-turned
+    spacing: 6, headDamage: 2, bodyDamage: 1,   // segments you lose when you touch their head / body
+    recoil: 1.0, edgeMargin: 36                 // after biting they back off for this long; they steer away from the edge
+  },
+  orb:   { dropChance: 0.9, value: 1, magnet: 28, magnetSpeed: 130, pickR: 6, xpPerValue: 1 },
+  xp:    { base: 10, mult: 1.22, cardEvery: 3 },   // xp needed = base*mult^(level-1); a card choice only every Nth level (1 = every level)
+  fx:    { hitFlash: 0.08, shakeDecay: 20 },
+  pools: { bolts: 600, orbs: 500, particles: 500, rings: 24, beams: 16 }
+};
+
+const C = CONFIG;
+const VW = C.view.w, VH = C.view.h, AW = C.arena.w, AH = C.arena.h;
+const TICK = 1 / 60;
+const TAU = Math.PI * 2;
+const rnd = Math.random;
+
+const COL = {
+  bg:'#171a22', out:'#0c0e13', grid:'#1d212c', border:'#3a4152', dark:'#0b0d12',
+  head:'#F4FFE0', orange:'#FF8A3D', white:'#FFFFFF',
+  enemy:'#8470a8', boss:'#7d4a52', rival:'#8f4a5a', rivalHead:'#c0687a', orb:'#58D8E8', block:'#59505e', ui:'#E8ECF5', dim:'#8a93a8'
+};
+const WEAPONS = {
+  spitter:{ color:'#B7F34A' },
+  spike:  { color:'#FFB13D', fuse:'mace'  },
+  laser:  { color:'#6FF0FF' },
+  mace:   { color:'#FFE27A' }
+};
+
+/* ===================== UTIL + CANVAS ===================== */
+const clamp = (v,a,b) => v < a ? a : v > b ? b : v;
+const rad = d => d * Math.PI / 180;
+function angDiff(a, b) {            // shortest signed angle from a to b
+  let d = (b - a) % TAU;
+  if (d > Math.PI) d -= TAU; else if (d < -Math.PI) d += TAU;
+  return d;
+}
+const R = Math.round;
+
+const screen = document.getElementById('screen');
+const sctx = screen.getContext('2d');
+const buf = document.createElement('canvas');
+buf.width = VW; buf.height = VH;
+const g = buf.getContext('2d');
+let scale = 1, offX = 0, offY = 0;
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  screen.width = Math.max(1, Math.floor(innerWidth * dpr));
+  screen.height = Math.max(1, Math.floor(innerHeight * dpr));
+  // whole-number upscale only => pixel-perfect; leftover space becomes letterbox
+  scale = Math.max(1, Math.floor(Math.min(screen.width / VW, screen.height / VH)));
+  offX = Math.floor((screen.width - VW * scale) / 2);
+  offY = Math.floor((screen.height - VH * scale) / 2);
+}
+addEventListener('resize', resize);
+resize();
+
+/* ===================== INPUT ===================== */
+const keys = {};          // held keys
+const pressed = {};       // edge-triggered presses, consumed with took()
+let clicked = null, mouse = { x: -1, y: -1 }, mouseMoved = false;
+let debug = false;
+
+addEventListener('keydown', e => {
+  if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','F3'].includes(e.code)) e.preventDefault();
+  audioInit();
+  if (!e.repeat) pressed[e.code] = true;
+  keys[e.code] = true;
+  if (e.code === 'F3' && !e.repeat) debug = !debug;
+  if (e.code === 'KeyM' && !e.repeat) toggleMute();
+  if (e.code === 'KeyF' && !e.repeat) toggleFullscreen();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+addEventListener('blur', () => {
+  for (const k in keys) keys[k] = false;
+  pauseGame();
+});
+function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) { document.exitFullscreen(); return; }
+    const el = document.documentElement;
+    const p = el.requestFullscreen ? el.requestFullscreen() : (el.webkitRequestFullscreen ? el.webkitRequestFullscreen() : null);
+    if (p && p.then) p.then(() => { if (screen_orient() && screen_orient().lock) screen_orient().lock('landscape').catch(() => {}); }).catch(() => {});
+  } catch (err) {}
+}
+const screen_orient = () => (window.screen && window.screen.orientation) || null;
+document.addEventListener('visibilitychange', () => {
+  if (!AUD.ctx) return;
+  if (document.hidden) { pauseGame(); AUD.ctx.suspend(); } else AUD.ctx.resume();
+});
+screen.addEventListener('contextmenu', e => e.preventDefault());
+function toVirtual(e) {
+  const r = screen.getBoundingClientRect();
+  const px = (e.clientX - r.left) * (screen.width / r.width);
+  const py = (e.clientY - r.top) * (screen.height / r.height);
+  return { x: (px - offX) / scale, y: (py - offY) / scale };
+}
+screen.addEventListener('mousemove', e => { mouse = toVirtual(e); mouseMoved = true; });
+addEventListener('pointerup', () => audioInit());
+screen.addEventListener('mousedown', e => { audioInit(); clicked = toVirtual(e); });
+
+// Touch: drag anywhere = floating joystick, on-screen buttons for shed / laser / pause. Menus take taps as clicks.
+const touch = { enabled: !!(window.matchMedia && matchMedia('(pointer: coarse)').matches), id: null, sx: 0, sy: 0, ax: 0, ay: 0 };
+const TB = { shed: { x: VW - 22, y: VH - 42, r: 15, label: 'SHED' }, laser: { x: VW - 56, y: VH - 30, r: 15, label: 'LASER' }, pause: { x: VW - 9, y: 27, r: 8 } };
+const hitBtn = (b, v) => Math.hypot(v.x - b.x, v.y - b.y) <= b.r + 3;
+screen.addEventListener('touchstart', e => {
+  e.preventDefault(); audioInit(); touch.enabled = true;
+  for (const t of e.changedTouches) {
+    const v = toVirtual(t);
+    mouse = v; mouseMoved = true;
+    if (S === 'play') {
+      if (hitBtn(TB.pause, v)) pressed.Escape = true;
+      else if (hitBtn(TB.shed, v)) pressed.Space = true;
+      else if (hitBtn(TB.laser, v)) pressed.KeyE = true;
+      else if (touch.id === null) { touch.id = t.identifier; touch.sx = v.x; touch.sy = v.y; touch.ax = touch.ay = 0; }
+    } else clicked = v;
+  }
+}, { passive: false });
+screen.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier !== touch.id) continue;
+    const v = toVirtual(t), dx = v.x - touch.sx, dy = v.y - touch.sy, len = Math.hypot(dx, dy), K = 16;
+    if (len > K) { touch.sx += dx / len * (len - K); touch.sy += dy / len * (len - K); }   // stick follows the thumb
+    touch.ax = len < 3 ? 0 : dx / Math.max(len, K); touch.ay = len < 3 ? 0 : dy / Math.max(len, K);
+  }
+}, { passive: false });
+const touchEnd = e => { for (const t of e.changedTouches) if (t.identifier === touch.id) { touch.id = null; touch.ax = touch.ay = 0; } };
+screen.addEventListener('touchend', e => { audioInit(); touchEnd(e); });
+screen.addEventListener('touchcancel', touchEnd);
+
+const took = code => { if (pressed[code]) { pressed[code] = false; return true; } return false; };
+
+const pad = { ax: 0, ay: 0, prev: [], map: { 0:'PadA', 1:'PadB', 2:'PadX', 3:'PadY', 9:'PadStart', 12:'PadUp', 13:'PadDown', 14:'PadLeft', 15:'PadRight' } };
+function pollPad() {
+  pad.ax = pad.ay = 0;
+  const list = navigator.getGamepads ? navigator.getGamepads() : [];
+  let gp = null;
+  for (const p of list) if (p && p.connected) { gp = p; break; }
+  if (!gp) return;
+  const x = gp.axes[0] || 0, y = gp.axes[1] || 0;
+  if (Math.hypot(x, y) > 0.3) { pad.ax = x; pad.ay = y; }
+  for (const i in pad.map) {                        // rising edges -> pressed[]
+    const now = !!(gp.buttons[i] && gp.buttons[i].pressed);
+    if (now && !pad.prev[i]) pressed[pad.map[i]] = true;
+    pad.prev[i] = now;
+  }
+  const b = gp.buttons;                              // d-pad also steers
+  if (b[14] && b[14].pressed) pad.ax -= 1;
+  if (b[15] && b[15].pressed) pad.ax += 1;
+  if (b[12] && b[12].pressed) pad.ay -= 1;
+  if (b[13] && b[13].pressed) pad.ay += 1;
+}
+const steer = { x: 0, y: 0, mag: 0 };
+function readSteer() {
+  if (autopilot) { steer.x = ap.x; steer.y = ap.y; steer.mag = 1; return; }   // bot drives
+  let x = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  let y = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+  if (x === 0 && y === 0) { x = pad.ax; y = pad.ay; }
+  if (x === 0 && y === 0 && touch.id !== null) { x = touch.ax; y = touch.ay; }
+  steer.x = x; steer.y = y; steer.mag = Math.hypot(x, y);
+}
+
+/* ===================== SAVE DATA (best score, volume) ===================== */
+const SAVE_KEY = 'serpent-swarm-save-v1';
+const save = { bestScore: 0, bestKills: 0, wins: 0, runs: 0, musicVol: 6, sfxVol: 8, muted: false };
+try { Object.assign(save, JSON.parse(localStorage.getItem(SAVE_KEY)) || {}); } catch (err) {}
+function writeSave() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch (err) {} }
+
+/* ===================== AUDIO (everything synthesized with WebAudio: no files) ===================== */
+const AUD = { ctx: null, master: null, musicBus: null, musicLP: null, sfxBus: null, noise: null, lp: 18000 };
+const MUS = { track: '', step: 0, next: 0, I: 0 };
+const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+function audioInit() {                                    // browsers only allow audio after a user gesture
+  if (AUD.ctx) { if (AUD.ctx.state === 'suspended' && !document.hidden) AUD.ctx.resume(); return; }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  try {
+    const c = new AC();
+    const comp = c.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 6;
+    AUD.master = c.createGain(); AUD.master.connect(comp); comp.connect(c.destination);
+    AUD.musicLP = c.createBiquadFilter(); AUD.musicLP.type = 'lowpass'; AUD.musicLP.frequency.value = AUD.lp;
+    AUD.musicBus = c.createGain(); AUD.musicBus.connect(AUD.musicLP); AUD.musicLP.connect(AUD.master);
+    AUD.sfxBus = c.createGain(); AUD.sfxBus.connect(AUD.master);
+    const len = c.sampleRate; AUD.noise = c.createBuffer(1, len, c.sampleRate);
+    const d = AUD.noise.getChannelData(0); for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    AUD.ctx = c; applyVolumes(); MUS.next = c.currentTime + 0.1;
+    if (c.state === 'suspended') c.resume();
+  } catch (err) { AUD.ctx = null; }
+}
+function applyVolumes() {
+  if (!AUD.ctx) return;
+  const t = AUD.ctx.currentTime;
+  AUD.master.gain.setTargetAtTime(save.muted ? 0 : 1, t, 0.03);
+  AUD.musicBus.gain.setTargetAtTime(Math.pow(save.musicVol / 10, 2) * 1.3, t, 0.03);
+  AUD.sfxBus.gain.setTargetAtTime(Math.pow(save.sfxVol / 10, 2) * 1.6, t, 0.03);
+}
+function toggleMute() { save.muted = !save.muted; applyVolumes(); writeSave(); toast(save.muted ? 'SOUND OFF' : 'SOUND ON'); }
+function adjustVol(key, d) { save[key] = clamp(save[key] + d, 0, 10); applyVolumes(); writeSave(); sfx('move'); }
+
+// tone: one oscillator note. o = { to: slide to freq, lp: lowpass hz, a: attack s, pad: sustain then fade }
+function tone(f, t, d, type, v, bus, o) {
+  const c = AUD.ctx, os = c.createOscillator(), gn = c.createGain();
+  os.type = type; os.frequency.setValueAtTime(f, t);
+  if (o && o.to) os.frequency.exponentialRampToValueAtTime(Math.max(1, o.to), t + d);
+  let node = os;
+  if (o && o.lp) { const fl = c.createBiquadFilter(); fl.type = 'lowpass'; fl.frequency.value = o.lp; os.connect(fl); node = fl; }
+  const a = (o && o.a) || 0.005;
+  gn.gain.setValueAtTime(0.0001, t);
+  if (o && o.pad) { gn.gain.linearRampToValueAtTime(v, t + a); gn.gain.setValueAtTime(v, t + Math.max(a, d - 0.4)); gn.gain.linearRampToValueAtTime(0.0001, t + d); }
+  else { gn.gain.linearRampToValueAtTime(v, t + a); gn.gain.exponentialRampToValueAtTime(0.0001, t + d); }
+  node.connect(gn); gn.connect(bus || AUD.sfxBus);
+  os.start(t); os.stop(t + d + 0.03);
+}
+function noiseHit(t, d, v, ftype, freq, bus, to) {
+  const c = AUD.ctx, src = c.createBufferSource(), fl = c.createBiquadFilter(), gn = c.createGain();
+  src.buffer = AUD.noise; fl.type = ftype; fl.frequency.setValueAtTime(freq, t);
+  if (to) fl.frequency.exponentialRampToValueAtTime(to, t + d);
+  gn.gain.setValueAtTime(v, t); gn.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  src.connect(fl); fl.connect(gn); gn.connect(bus || AUD.sfxBus);
+  src.start(t, Math.random() * 0.5, d + 0.05);
+}
+// ---- sound effects ----
+const PENT = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21];
+let orbStep = 0, orbLastT = -9;
+const SFX_GAP = { shoot: 0.07, hit: 0.05, kill: 0.04, orb: 0.03, warn: 0.4, move: 0.03, laser: 0.1, stun: 0.2 };
+const SFX = {
+  shoot:  t => tone(640, t, 0.07, 'square', 0.03, 0, { to: 300 }),
+  hit:    t => noiseHit(t, 0.04, 0.05, 'highpass', 2500, 0),
+  kill:   t => { tone(260, t, 0.1, 'triangle', 0.09, 0, { to: 70 }); noiseHit(t, 0.07, 0.06, 'lowpass', 3000, 0, 400); },
+  big:    t => { tone(180, t, 0.3, 'sawtooth', 0.12, 0, { to: 40, lp: 900 }); noiseHit(t, 0.25, 0.14, 'lowpass', 2500, 0, 200); },
+  orb:    t => { orbStep = (t - orbLastT < 0.6) ? Math.min(orbStep + 1, 9) : 0; orbLastT = t; tone(mtof(72 + PENT[orbStep]), t, 0.09, 'sine', 0.09, 0); },
+  seg:    t => { tone(330, t, 0.12, 'square', 0.06, 0, { to: 660 }); tone(660, t + 0.08, 0.1, 'square', 0.05, 0); },
+  fuse:   t => { [0, 4, 7, 12, 16].forEach((n, i) => tone(mtof(72 + n), t + i * 0.04, 0.12, 'square', 0.06, 0)); noiseHit(t, 0.2, 0.06, 'highpass', 4000, 0); },
+  shed:   t => { noiseHit(t, 0.3, 0.14, 'bandpass', 2500, 0, 300); tone(120, t, 0.25, 'sine', 0.2, 0, { to: 40 }); },
+  laser:  t => { tone(1100, t, 0.35, 'sawtooth', 0.1, 0, { to: 60, lp: 3000 }); tone(550, t, 0.3, 'square', 0.06, 0, { to: 40 }); noiseHit(t, 0.3, 0.1, 'highpass', 1500, 0); },
+  hurt:   t => { noiseHit(t, 0.18, 0.18, 'lowpass', 1800, 0, 200); tone(200, t, 0.2, 'sawtooth', 0.12, 0, { to: 60, lp: 1200 }); },
+  die:    t => { tone(440, t, 0.9, 'sawtooth', 0.15, 0, { to: 30, lp: 2000 }); noiseHit(t, 0.7, 0.2, 'lowpass', 2500, 0, 100); tone(110, t + 0.1, 0.8, 'sine', 0.25, 0, { to: 25 }); },
+  stun:   t => tone(130, t, 0.15, 'sine', 0.2, 0, { to: 50 }),
+  level:  t => [0, 4, 7, 12].forEach((n, i) => tone(mtof(67 + n), t + i * 0.07, 0.18, 'square', 0.07, 0)),
+  tip:    t => { tone(mtof(84), t, 0.15, 'sine', 0.07, 0); tone(mtof(91), t + 0.08, 0.2, 'sine', 0.06, 0); },
+  pick:   t => [0, 7, 12, 19].forEach((n, i) => tone(mtof(64 + n), t + i * 0.05, 0.2, 'triangle', 0.1, 0)),
+  move:   t => tone(900, t, 0.035, 'square', 0.04, 0),
+  select: t => { tone(600, t, 0.06, 'square', 0.06, 0); tone(900, t + 0.06, 0.1, 'square', 0.06, 0); },
+  back:   t => tone(500, t, 0.08, 'square', 0.05, 0, { to: 300 }),
+  boss:   t => { tone(55, t, 1.6, 'sawtooth', 0.2, 0, { lp: 500, a: 0.3 }); tone(82.4, t, 1.6, 'sawtooth', 0.14, 0, { lp: 500, a: 0.4 }); noiseHit(t, 1.2, 0.08, 'lowpass', 400, 0); },
+  tele:   t => tone(180, t, 0.85, 'sine', 0.15, 0, { to: 900, a: 0.2 }),
+  slam:   t => { noiseHit(t, 0.45, 0.25, 'lowpass', 2000, 0, 80); tone(100, t, 0.45, 'sine', 0.35, 0, { to: 28 }); },
+  rival:  t => { tone(440, t, 0.14, 'triangle', 0.1, 0); tone(330, t + 0.16, 0.14, 'triangle', 0.1, 0); tone(440, t + 0.32, 0.14, 'triangle', 0.1, 0); },
+  warn:   t => tone(1000, t, 0.06, 'square', 0.04, 0),
+  win:    t => { [0, 4, 7, 12].forEach((n, i) => tone(mtof(60 + n), t + i * 0.14, 0.5, 'square', 0.08, 0, { lp: 3000 })); [0, 4, 7, 12].forEach(n => tone(mtof(72 + n), t + 0.7, 1.4, 'triangle', 0.08, 0)); },
+};
+const sfxLast = {};
+function sfx(name) {
+  const c = AUD.ctx;
+  if (!c || save.muted || save.sfxVol === 0 || c.state !== 'running') return;
+  const t = c.currentTime;
+  if (t - (sfxLast[name] || -9) < (SFX_GAP[name] || 0)) return;
+  sfxLast[name] = t; SFX[name](t + 0.005);
+}
+// ---- music: a tiny step sequencer (16 steps per bar, 4-bar loop) scheduled ahead of the audio clock ----
+const PROG_A = [{ r: 45, c: [57, 60, 64] }, { r: 41, c: [53, 57, 60] }, { r: 48, c: [55, 60, 64] }, { r: 43, c: [55, 59, 62] }];   // Am F C G
+const PROG_B = [{ r: 45, c: [57, 60, 64] }, { r: 41, c: [53, 57, 60] }, { r: 38, c: [50, 53, 57] }, { r: 40, c: [52, 56, 59] }];   // Am F Dm E (boss)
+const TEMPO = { title: 84, end: 66, game: 108, boss: 140 };
+function kick(t, bus) { tone(150, t, 0.16, 'sine', 0.55, bus, { to: 42 }); }
+function snare(t, bus) { noiseHit(t, 0.14, 0.22, 'highpass', 1800, bus); tone(210, t, 0.09, 'triangle', 0.14, bus, { to: 120 }); }
+function hat(t, open, bus, k) { noiseHit(t, open ? 0.12 : 0.035, (open ? 0.07 : 0.05) * (k || 1), 'highpass', 7500, bus); }
+function chordPad(ch, t, d, v) { for (const n of ch.c) tone(mtof(n - 12), t, d, 'triangle', v, AUD.musicBus, { a: 0.5, pad: true }); }
+function musicSet(name) { if (MUS.track === name) return; MUS.track = name; MUS.step = 0; if (AUD.ctx) MUS.next = AUD.ctx.currentTime + 0.08; }
+function musicStep(tr, step, t, sd) {
+  if (save.muted || save.musicVol === 0) return;
+  const mb = AUD.musicBus, s = step & 15, ch = (tr === 'boss' ? PROG_B : PROG_A)[(step >> 4) & 3], I = MUS.I;
+  if (tr === 'title') {
+    if (s === 0) chordPad(ch, t, sd * 16, 0.05);
+    if (s % 2 === 0) tone(mtof(ch.c[[0, 1, 2, 1][(s >> 1) & 3]] + 12), t, sd * 3, 'triangle', 0.05, mb);
+    if (s === 0 || s === 8) tone(mtof(ch.r), t, sd * 6, 'sine', 0.16, mb);
+    return;
+  }
+  if (tr === 'end') {
+    if (s === 0) chordPad(ch, t, sd * 16, 0.06);
+    if (s === 0 || s === 6 || s === 10) tone(mtof(ch.c[(s >> 1) % 3] + 24), t, sd * 6, 'sine', 0.04, mb);
+    return;
+  }
+  const boss = tr === 'boss';
+  if (s === 0) chordPad(ch, t, sd * 16, boss ? 0.05 : 0.035);
+  if (s % 4 === 0 || (boss && s === 14)) kick(t, mb);
+  if ((s === 4 || s === 12) && (boss || I > 0.3)) snare(t, mb);
+  if (boss || I > 0.15) { if (s % 2 === 0) hat(t, s % 4 === 2, mb); else if (boss) hat(t, false, mb, 0.5); }
+  if (boss) tone(mtof(ch.r + ((s & 3) === 2 ? 12 : 0)), t, sd * 0.9, 'sawtooth', 0.1, mb, { lp: 900 });
+  else if (s === 0 || s === 3 || s === 6 || s === 8 || s === 11 || s === 14) tone(mtof(ch.r + (s === 6 || s === 14 ? 12 : 0)), t, sd * 1.7, 'sawtooth', 0.1, mb, { lp: 650 });
+  if (boss || I > 0.45) {
+    const every = (boss || I > 0.8) ? 1 : 2;
+    if (s % every === 0) tone(mtof(ch.c[[0, 1, 2, 1][((s / every) | 0) & 3]] + 12), t, sd * every * 0.9, 'square', boss ? 0.045 : 0.035, mb, { lp: 2500 });
+  }
+}
+function musicPump() {
+  const c = AUD.ctx;
+  if (!c || c.state !== 'running' || !MUS.track) return;
+  if (MUS.next < c.currentTime - 0.3) MUS.next = c.currentTime + 0.05;
+  while (MUS.next < c.currentTime + 0.25) {
+    const tr = MUS.track, bpm = tr === 'game' ? TEMPO.game + MUS.I * 14 : TEMPO[tr], sd = 60 / bpm / 4;
+    musicStep(tr, MUS.step, MUS.next, sd);
+    MUS.next += sd; MUS.step++;
+  }
+}
+function musicDirector() {                                  // choose the track + intensity from the game state
+  const inRun = S === 'play' || S === 'paused' || S === 'levelup' || (S === 'guide' && guideFrom === 'paused');
+  let tr = 'title';
+  if (inRun) tr = (bossSpawned && boss && boss.active) ? 'boss' : 'game';
+  else if (S === 'win' || S === 'lose') tr = 'end';
+  MUS.I = inRun ? clamp(runT / C.boss.time, 0, 1) : 0;
+  musicSet(tr);
+  const want = (S === 'paused' || S === 'levelup' || (S === 'guide' && guideFrom === 'paused')) ? 700 : 18000;   // muffle behind menus
+  if (AUD.ctx && want !== AUD.lp) { AUD.lp = want; AUD.musicLP.frequency.setTargetAtTime(want, AUD.ctx.currentTime, 0.06); }
+}
+let toastT = 0, toastMsg = '';
+function toast(m) { toastMsg = m; toastT = 1.5; }
+
+/* ===================== POOLS + SPATIAL HASH ===================== */
+const MAXE = C.enemy.maxActive + 8 + C.rival.max * C.rival.len;
+const enemies = [];
+for (let i = 0; i < MAXE; i++) enemies.push({ active:false, boss:false, x:0, y:0, hp:1, maxHp:1, r:4, speed:0,
+  flash:0, spikeT:0, atk:0, touchCd:0, blockT:0, ph:0, tele:0, tx:0, ty:0, tpT:0, owner:-1, seg:0 });
+const bolts = [], orbs = [], parts = [], rings = [], beams = [];
+for (let i = 0; i < C.pools.bolts; i++) bolts.push({ active:false, x:0, y:0, vx:0, vy:0, life:0 });
+for (let i = 0; i < C.pools.orbs; i++) orbs.push({ active:false, x:0, y:0 });
+for (let i = 0; i < C.pools.particles; i++) parts.push({ active:false, x:0, y:0, vx:0, vy:0, life:0, max:1, color:'#fff', size:1 });
+for (let i = 0; i < C.pools.rings; i++) rings.push({ active:false, x:0, y:0, r:0, grow:0, life:0, max:1, color:'#fff' });
+for (let i = 0; i < C.pools.beams; i++) beams.push({ active:false, x1:0, y1:0, x2:0, y2:0, life:0, w:3 });
+
+const rivals = [];                                      // enemy snakes; their segments live in the enemy pool (owner = rival index)
+for (let i = 0; i < C.rival.max; i++) rivals.push({ active: false, idx: [], hp: 0, maxHp: 0, ang: 0, recoil: 0 });
+function takeFree(pool) { for (let i = 0; i < pool.length; i++) if (!pool[i].active) return pool[i]; return null; }
+
+// Spatial hash for ENEMIES (rebuilt every tick). Linked lists in typed arrays => zero allocation.
+const CS = 24, HC = Math.ceil(AW / CS), HR = Math.ceil(AH / CS);
+const cellHead = new Int32Array(HC * HR), nextE = new Int32Array(MAXE), qBuf = new Int32Array(MAXE);
+let activeEnemies = 0;
+function rebuildHash() {
+  cellHead.fill(-1);
+  let n = 0;
+  for (let i = 0; i < MAXE; i++) {
+    const e = enemies[i];
+    if (!e.active) continue;
+    n++;
+    const cx = clamp((e.x / CS) | 0, 0, HC - 1), cy = clamp((e.y / CS) | 0, 0, HR - 1);
+    const c = cy * HC + cx;
+    nextE[i] = cellHead[c]; cellHead[c] = i;
+  }
+  activeEnemies = n;
+}
+// Fills qBuf with candidate enemy indices in cells overlapping the circle; returns count.
+// NOTE: results are only valid until the next hashQuery call.
+function hashQuery(x, y, r) {
+  const x0 = clamp(((x - r) / CS) | 0, 0, HC - 1), x1 = clamp(((x + r) / CS) | 0, 0, HC - 1);
+  const y0 = clamp(((y - r) / CS) | 0, 0, HR - 1), y1 = clamp(((y + r) / CS) | 0, 0, HR - 1);
+  let n = 0;
+  for (let cy = y0; cy <= y1; cy++)
+    for (let cx = x0; cx <= x1; cx++)
+      for (let i = cellHead[cy * HC + cx]; i !== -1; i = nextE[i]) qBuf[n++] = i;
+  return n;
+}
+
+/* ===================== GAME STATE ===================== */
+let S = 'title';              // title | play | paused | levelup | win | lose | guide
+let runT, kills, level, xp, xpNeed, orbCount, pendingLevels, hitstop, pendingWin, shake, bannerT, bossSpawned, boss;
+let lvlBannerT = 0, spawnT, shedCd, lockT, sel, cardChoices = [];
+let head, segs, shedSegs, blocks;
+let cam = { x: AW / 2, y: AH / 2 };
+let P = { speed: 0, turn: 0, orb: 0, weapon: 'spitter' };   // passives + chosen weapon type
+let deathMsg = 'THE SWARM GOT YOU', rivalT = 0, rivalBannerT = 0;
+let fps = 60, titleT = 0, laserCd = 0, tipT = 0, tipIdx = 0, tipLines = [];
+
+// path buffer (ring) of head positions with cumulative distance
+const PN = 8192;
+const pX = new Float64Array(PN), pY = new Float64Array(PN), pD = new Float64Array(PN);
+let pCount = 0, pTotal = 0, pLastX = 0, pLastY = 0;
+
+function newRun() {
+  for (const a of [enemies, bolts, orbs, parts, rings, beams]) for (const o of a) o.active = false;
+  maxLen = C.snake.startSegs; newBest = false;
+  runT = 0; kills = 0; level = 1; xp = 0; xpNeed = C.xp.base; orbCount = 0; pendingLevels = 0;
+  hitstop = 0; pendingWin = false; shake = 0; bannerT = 0; bossSpawned = false; boss = null;
+  deathMsg = 'THE SWARM GOT YOU'; rivalT = C.rival.first; rivalBannerT = 0; for (const r of rivals) r.active = false; lvlBannerT = 0; tipT = 0; tipIdx = 0; laserCd = 0; spawnT = 1.0; shedCd = 0; lockT = 0; sel = 1;
+  P = { speed: 0, turn: 0, orb: 0, weapon: 'spitter' };
+  shedSegs = []; blocks = [];
+  head = { x: AW / 2, y: AH / 2, ang: 0, invuln: 0, stun: 0, grace: 0, hurtFlash: 0, t: 0 };
+  // pre-fill the path behind the head so the starting body is laid out straight
+  pCount = 0; pTotal = 0;
+  const L = (C.snake.startSegs + 30) * C.snake.spacing;
+  for (let k = L; k >= 0; k--) pathPush(head.x - k, head.y);
+  segs = [];
+  for (let i = 0; i < C.snake.startSegs; i++) segs.push({ type: 'spitter', x: head.x, y: head.y, cd: rnd() * C.spitter.interval });
+  updateSegments();
+  cam.x = head.x; cam.y = head.y;
+  S = 'play';
+}
+
+/* ===================== SNAKE ===================== */
+function pathPush(x, y) {
+  if (pCount > 0) {
+    const d = Math.hypot(x - pLastX, y - pLastY);
+    if (d < 0.01) return;
+    pTotal += d;
+  }
+  const i = pCount % PN;
+  pX[i] = x; pY[i] = y; pD[i] = pTotal;
+  pLastX = x; pLastY = y; pCount++;
+}
+// Place segment i exactly (i+1)*spacing of path-distance behind the head. Segments are
+// processed front to back, so one backwards walk through the ring serves all of them.
+function updateSegments() {
+  const minJ = Math.max(0, pCount - PN);
+  let j = pCount - 1;
+  for (let i = 0; i < segs.length; i++) {
+    const target = pTotal - (i + 1) * C.snake.spacing;
+    while (j > minJ && pD[j % PN] > target) j--;
+    const a = j % PN, s = segs[i];
+    if (j < pCount - 1) {
+      const b = (j + 1) % PN, span = pD[b] - pD[a];
+      const f = span > 0 ? clamp((target - pD[a]) / span, 0, 1) : 0;
+      s.x = pX[a] + (pX[b] - pX[a]) * f; s.y = pY[a] + (pY[b] - pY[a]) * f;
+    } else { s.x = pX[a]; s.y = pY[a]; }
+  }
+}
+
+function updateHead(dt) {
+  head.t += dt;
+  if (head.invuln > 0) head.invuln -= dt;
+  if (head.grace > 0) head.grace -= dt;
+  if (head.hurtFlash > 0) head.hurtFlash -= dt;
+  // Stunned (bit own body): can't steer and slows down, but NEVER stops dead (a full freeze felt like input lag).
+  const stunned = head.stun > 0;
+  if (stunned) head.stun -= dt;
+
+  readSteer();
+  if (!stunned && steer.mag > 0.25) {                       // fixed max turn rate toward input
+    const want = Math.atan2(steer.y, steer.x);
+    const maxT = rad(C.snake.turnRate * (1 + P.turn)) * dt;
+    head.ang += clamp(angDiff(head.ang, want), -maxT, maxT);
+  }
+  const sp = C.snake.speed * (1 + P.speed) * (stunned ? C.snake.stunSpeed : 1);
+  head.x += Math.cos(head.ang) * sp * dt;
+  head.y += Math.sin(head.ang) * sp * dt;
+  if (C.arena.lethalBorder && (head.x < C.snake.headR || head.x > AW - C.snake.headR ||
+      head.y < C.snake.headR || head.y > AH - C.snake.headR)) { killHead('YOU HIT THE ARENA EDGE'); return; }   // DEFEAT: touched the arena edge
+  head.x = clamp(head.x, C.snake.headR, AW - C.snake.headR);
+  head.y = clamp(head.y, C.snake.headR, AH - C.snake.headR);
+  resolveBlocks();
+  pathPush(head.x, head.y);
+}
+
+function addSegment() {
+  const tail = segs.length ? segs[segs.length - 1] : head;
+  segs.push({ type: P.weapon, x: tail.x, y: tail.y, cd: rnd() * 0.5 });
+  if (segs.length > maxLen) maxLen = segs.length;
+  sfx('seg');
+  tryFuse();
+}
+// Fusion: if the tail now ends with 3 matching fusable segments, merge them into one upgraded segment.
+function tryFuse() {
+  for (;;) {
+    const n = segs.length;
+    if (n < 3) return;
+    const a = segs[n - 3], b = segs[n - 2], c = segs[n - 1];
+    if (a.type !== b.type || b.type !== c.type || !WEAPONS[a.type].fuse) return;
+    a.type = WEAPONS[a.type].fuse; a.cd = 0.5;
+    segs.length = n - 2;
+    pop(a.x, a.y);
+  }
+}
+function pop(x, y) {                                       // fusion "pop" effect
+  sfx('fuse');
+  spawnRing(x, y, 3, 40, 0.3, '#FFFFFF');
+  spawnRing(x, y, 1, 22, 0.2, WEAPONS[segs[segs.length - 1] ? segs[segs.length - 1].type : 'laser'].color);
+  burst(x, y, 12, '#FFFFFF', 60, 0.4);
+}
+// n = segments lost. Boss hits pass nonLethal=true: they can take you down to 1 segment but never
+// finish you off from 2+, and give a longer invulnerability window so hits can't be chained.
+function killHead(msg) {
+  deathMsg = msg || deathMsg;                                    // instant defeat
+  if (S !== 'play') return;
+  sfx('die');
+  burst(head.x, head.y, 20, COL.orange, 90, 0.6); spawnRing(head.x, head.y, 3, 30, 0.4, COL.orange);
+  shake = Math.max(shake, 5);
+  segs.length = 0;
+  endRun('lose');
+}
+function hurtHead(n, invuln, nonLethal) {
+  if (head.invuln > 0 || S !== 'play') return;
+  n = n || 1;
+  if (nonLethal && segs.length > 1) n = Math.min(n, segs.length - 1);
+  for (let i = 0; i < n && segs.length; i++) segs.pop();
+  head.invuln = invuln || C.snake.hitInvuln; head.hurtFlash = 0.2;
+  spawnRing(head.x, head.y, 2, 22, 0.25, COL.orange);
+  burst(head.x, head.y, 8, COL.orange, 50, 0.35);
+  shake = Math.max(shake, 2);
+  if (segs.length === 0) { sfx('die'); endRun('lose'); } else sfx('hurt');
+}
+function doShed() {
+  if (shedCd > 0 || segs.length < 2) return;
+  const n = Math.min(Math.max(1, Math.floor(segs.length / 3)), segs.length - 1);   // never the head
+  for (let i = 0; i < n; i++) {
+    const s = segs.pop();
+    shedSegs.push({ x: s.x, y: s.y, type: s.type, t: C.shed.fuse });
+  }
+  shedCd = C.shed.cooldown; sfx('shed');
+}
+
+/* ===================== ENEMIES ===================== */
+// 'difficulty minutes': ramps 0 -> rampTo over the run, so a 2-minute test run still escalates.
+function minuteIdx() { return runT / C.boss.time * C.enemy.rampTo; }
+function spawnEnemy(x, y, isBoss) {
+  const e = takeFree(enemies);
+  if (!e) return null;
+  const mul = 1 + C.enemy.hpPerMinute * minuteIdx();
+  e.active = true; e.boss = !!isBoss; e.x = x; e.y = y;
+  e.flash = 0; e.spikeT = 0; e.atk = 0; e.touchCd = 0; e.ph = rnd() * TAU; e.tele = 0; e.tpT = C.boss.teleportEvery; e.owner = -1;
+  if (isBoss) { e.hp = e.maxHp = C.boss.hp; e.r = C.boss.r; e.speed = C.boss.speed; e.blockT = C.boss.blockEvery; }
+  else { e.hp = e.maxHp = C.enemy.swarmerHp * mul; e.r = C.enemy.swarmerR;
+         e.speed = C.enemy.swarmerSpeed * (1 + (rnd() * 2 - 1) * C.enemy.speedJitter); }
+  return e;
+}
+const sp = { x: 0, y: 0 };
+function spawnPoint() {                                  // a point in the arena just outside the camera view
+  for (let t = 0; t < 16; t++) {
+    const a = rnd() * TAU, d = C.enemy.spawnDist + rnd() * 30;
+    const x = cam.x + Math.cos(a) * d, y = cam.y + Math.sin(a) * d;
+    if (x > 6 && x < AW - 6 && y > 6 && y < AH - 6) { sp.x = x; sp.y = y; return; }
+  }
+  for (let t = 0; t < 40; t++) {                         // fallback: anywhere outside the view rect
+    const x = 6 + rnd() * (AW - 12), y = 6 + rnd() * (AH - 12);
+    if (Math.abs(x - cam.x) > VW / 2 + 12 || Math.abs(y - cam.y) > VH / 2 + 12) { sp.x = x; sp.y = y; return; }
+  }
+  sp.x = cam.x < AW / 2 ? AW - 8 : 8; sp.y = cam.y < AH / 2 ? AH - 8 : 8;
+}
+function spawnPack() {
+  spawnPoint();
+  const m = minuteIdx();
+  const n = Math.round(C.enemy.packBase + C.enemy.packPerMin * m) + ((rnd() * 3) | 0) - 1;
+  for (let i = 0; i < n; i++) {
+    if (activeEnemies >= C.enemy.maxActive) break;
+    if (!spawnEnemy(clamp(sp.x + (rnd() * 2 - 1) * 14, 4, AW - 4), clamp(sp.y + (rnd() * 2 - 1) * 14, 4, AH - 4), false)) break;
+    activeEnemies++;
+  }
+}
+function spawnBoss() {
+  bossSpawned = true; sfx('boss');
+  spawnPoint();
+  boss = spawnEnemy(sp.x, sp.y, true);
+  bannerT = 3;
+}
+function updateSpawning(dt) {
+  spawnT -= dt;
+  if (spawnT <= 0) {
+    spawnPack();
+    spawnT = Math.max(C.enemy.spawnMin, C.enemy.spawnBase - C.enemy.spawnDropPerMin * minuteIdx());
+  }
+  rivalT -= dt;
+  if (rivalT <= 0) {
+    rivalT = C.rival.every;
+    let n = 0; for (const r of rivals) if (r.active) n++;
+    if (n < Math.min(C.rival.max, 1 + Math.floor(runT / 40))) spawnRival();
+  }
+  if (!bossSpawned && runT >= C.boss.time) spawnBoss();
+}
+function updateEnemies(dt) {
+  for (let i = 0; i < MAXE; i++) {
+    const e = enemies[i];
+    if (!e.active) continue;
+    if (e.flash > 0) e.flash -= dt;
+    e.spikeT -= dt; e.atk -= dt; e.touchCd -= dt;
+    if (e.owner >= 0) continue;                          // rival segments are moved by updateRivals()
+    if (e.boss && e.tele > 0) {                          // charging a teleport: frozen + flashing orange
+      e.tele -= dt; e.atk = 0.12;
+      if (e.tele <= 0) bossLand(e);
+      continue;
+    }
+    const dx = head.x - e.x, dy = head.y - e.y;
+    const d = Math.hypot(dx, dy) || 1;
+    // straight at the head, plus a small perpendicular wobble so packs fan out a bit
+    const wob = e.boss ? 0 : Math.sin(runT * 3 + e.ph) * C.enemy.wobble;
+    e.x += (dx / d * e.speed - dy / d * wob) * dt;
+    e.y += (dy / d * e.speed + dx / d * wob) * dt;
+    e.x = clamp(e.x, 2, AW - 2); e.y = clamp(e.y, 2, AH - 2);
+    if (d < e.r + C.snake.headR + 6) e.atk = 0.12;       // orange "about to bite" flash
+    if (e.boss) {
+      e.blockT -= dt;
+      if (e.blockT <= 0) { e.blockT = C.boss.blockEvery; dropBlock(e.x, e.y); }
+      e.tpT -= dt;
+      if (e.tpT <= 0) bossStartTeleport(e);
+    }
+  }
+}
+/* ===================== RIVAL SNAKES ===================== */
+function freeEnemyIndex() { for (let k = 0; k < MAXE; k++) if (!enemies[k].active) return k; return -1; }
+function spawnRival() {
+  let r = null, ri = -1;
+  for (let i = 0; i < rivals.length; i++) if (!rivals[i].active) { r = rivals[i]; ri = i; break; }
+  if (!r) return;
+  spawnPoint();
+  const ang = Math.atan2(AH / 2 - sp.y, AW / 2 - sp.x);
+  r.idx.length = 0;
+  for (let i = 0; i < C.rival.len; i++) {
+    const k = freeEnemyIndex();
+    if (k < 0) { for (const j of r.idx) enemies[j].active = false; r.idx.length = 0; return; }
+    const e = enemies[k];
+    e.active = true; e.boss = false; e.owner = ri; e.seg = i; e.hp = e.maxHp = 1; e.speed = 0; e.r = i === 0 ? 4.5 : 3.5;
+    e.x = sp.x - Math.cos(ang) * i * C.rival.spacing; e.y = sp.y - Math.sin(ang) * i * C.rival.spacing;
+    e.flash = 0; e.spikeT = 0; e.atk = 0; e.touchCd = 0; e.tele = 0;
+    r.idx.push(k);
+  }
+  r.hp = r.maxHp = C.rival.hp * (1 + C.enemy.hpPerMinute * minuteIdx());
+  r.ang = ang; r.recoil = 0; r.active = true;
+  rivalBannerT = 2.5; sfx('rival');
+}
+function updateRivals(dt) {
+  const dtr = rad(C.rival.turnRate) * dt, sp2 = C.rival.spacing;
+  for (const r of rivals) {
+    if (!r.active) continue;
+    const h = enemies[r.idx[0]];
+    let want;
+    if (r.recoil > 0) { r.recoil -= dt; want = Math.atan2(h.y - head.y, h.x - head.x); }       // back off after a bite
+    else if (h.x < C.rival.edgeMargin || h.x > AW - C.rival.edgeMargin || h.y < C.rival.edgeMargin || h.y > AH - C.rival.edgeMargin)
+      want = Math.atan2(AH / 2 - h.y, AW / 2 - h.x);                                               // stay off the walls
+    else want = Math.atan2(head.y - h.y, head.x - h.x);                                            // hunt the player's head
+    r.ang += clamp(angDiff(r.ang, want), -dtr, dtr);                                               // limited turn rate => can be dodged
+    h.x = clamp(h.x + Math.cos(r.ang) * C.rival.speed * dt, 4, AW - 4);
+    h.y = clamp(h.y + Math.sin(r.ang) * C.rival.speed * dt, 4, AH - 4);
+    h.atk = Math.hypot(head.x - h.x, head.y - h.y) < 16 ? 0.12 : 0;
+    for (let i = 1; i < r.idx.length; i++) {                                                        // each segment trails the one ahead
+      const a = enemies[r.idx[i - 1]], b = enemies[r.idx[i]];
+      const dx = a.x - b.x, dy = a.y - b.y, d = Math.hypot(dx, dy) || 1;
+      if (d > sp2) { b.x += dx / d * (d - sp2); b.y += dy / d * (d - sp2); }
+    }
+  }
+}
+function killRival(r) {
+  r.active = false; kills++; sfx('big');
+  for (const k of r.idx) {
+    const e = enemies[k];
+    e.active = false; e.owner = -1;
+    burst(e.x, e.y, 5, C.rival ? COL.rival : COL.enemy, 55, 0.5);
+    const o = takeFree(orbs);
+    if (o) { o.active = true; o.x = e.x; o.y = e.y; } else gainOrb(C.orb.value + P.orb);
+  }
+  const h = enemies[r.idx[0]];
+  spawnRing(h.x, h.y, 3, 26, 0.35, COL.rivalHead);
+  shake = Math.max(shake, 2);
+}
+// Boss teleport: pick a landing spot near the head, show an orange ring there, then jump + shockwave.
+function bossStartTeleport(e) {
+  const a = rnd() * TAU, d = C.boss.teleMin + rnd() * (C.boss.teleMax - C.boss.teleMin);
+  e.tx = clamp(head.x + Math.cos(a) * d, 20, AW - 20); e.ty = clamp(head.y + Math.sin(a) * d, 20, AH - 20);
+  e.tele = C.boss.telegraph; e.tpT = C.boss.teleportEvery + C.boss.telegraph; sfx('tele');
+}
+function bossLand(e) {
+  spawnRing(e.x, e.y, 4, 24, 0.3, COL.orange); burst(e.x, e.y, 10, COL.boss, 60, 0.4);
+  dropBlock(e.x, e.y);                                  // leaves a wall where it left
+  e.x = e.tx; e.y = e.ty;
+  spawnRing(e.x, e.y, 4, C.boss.slamRadius, 0.3, COL.orange); burst(e.x, e.y, 14, COL.orange, 70, 0.4);
+  shake = Math.max(shake, 3); sfx('slam');
+  const dx = head.x - e.x, dy = head.y - e.y, rr = C.boss.slamRadius + C.snake.headR;
+  if (dx * dx + dy * dy < rr * rr) { if (C.boss.lethal) killHead('THE BOSS LANDED ON YOU'); else hurtHead(C.boss.slamDamage, C.boss.hitInvuln, true); }
+}
+function damageEnemy(e, dmg) {
+  if (e.owner >= 0) {                                    // a rival-snake segment: damage the whole snake's shared health
+    const r = rivals[e.owner];
+    r.hp -= dmg;
+    for (const k of r.idx) enemies[k].flash = C.fx.hitFlash;
+    if (r.hp <= 0) killRival(r);
+    return;
+  }
+  e.hp -= dmg; e.flash = C.fx.hitFlash;
+  if (e.hp <= 0) killEnemy(e, true); else sfx('hit');
+}
+function killEnemy(e, drop) {
+  if (!e.active) return;
+  e.active = false; kills++; sfx(e.boss ? 'big' : 'kill');
+  burst(e.x, e.y, e.boss ? 30 : 4, e.boss ? COL.boss : COL.enemy, e.boss ? 90 : 35, 0.4);
+  if (e.boss) { hitstop = C.boss.freeze; pendingWin = true; shake = 6; spawnRing(e.x, e.y, 4, 70, 0.5, '#FFFFFF'); return; }
+  if (drop && rnd() < C.orb.dropChance) {
+    const o = takeFree(orbs);
+    if (o) { o.active = true; o.x = e.x; o.y = e.y; }
+    else gainOrb(C.orb.value + P.orb);                   // pool full: just award it
+  }
+}
+function dropBlock(x, y) {
+  if (Math.hypot(x - head.x, y - head.y) < 22) return;   // never wall the player in
+  if (blocks.length >= C.boss.maxBlocks) blocks.shift();
+  blocks.push({ x: x - C.boss.blockSize / 2, y: y - C.boss.blockSize / 2, s: C.boss.blockSize, life: C.boss.blockLife, warn: 0.35 });
+}
+
+/* ===================== WEAPONS ===================== */
+function nearestEnemy(x, y, range) {
+  const n = hashQuery(x, y, range);
+  let best = null, bd = range * range;
+  for (let k = 0; k < n; k++) {
+    const e = enemies[qBuf[k]];
+    if (!e.active) continue;
+    const d = (e.x - x) * (e.x - x) + (e.y - y) * (e.y - y);
+    if (d <= bd) { bd = d; best = e; }
+  }
+  return best;
+}
+function fireBolt(x, y, tx, ty) {
+  const b = takeFree(bolts);
+  if (!b) return;
+  const dx = tx - x, dy = ty - y, d = Math.hypot(dx, dy) || 1;
+  sfx('shoot');
+  b.active = true; b.x = x; b.y = y; b.life = C.spitter.boltLife;
+  b.vx = dx / d * C.spitter.boltSpeed; b.vy = dy / d * C.spitter.boltSpeed;
+}
+// ACTIVE LASER: sacrifice the last C.laser.cost segments to fire a wide piercing beam along the head's facing.
+function doLaser() {
+  if (laserCd > 0 || segs.length <= C.laser.cost) return;   // always keep at least one segment
+  for (let i = 0; i < C.laser.cost; i++) {
+    const sg = segs.pop();
+    burst(sg.x, sg.y, 10, '#6FF0FF', 70, 0.4); spawnRing(sg.x, sg.y, 2, 14, 0.25, '#FFFFFF');
+  }
+  laserCd = C.laser.cooldown; sfx('laser');
+  const L = C.laser.length, ux = Math.cos(head.ang), uy = Math.sin(head.ang);
+  const x1 = head.x + ux * 5, y1 = head.y + uy * 5;
+  const bm = takeFree(beams);
+  if (bm) { bm.active = true; bm.x1 = x1; bm.y1 = y1; bm.x2 = x1 + ux * L; bm.y2 = y1 + uy * L; bm.life = C.laser.beamLife; bm.w = C.laser.width; }
+  shake = Math.max(shake, C.laser.shake);
+  const n = hashQuery(x1 + ux * L / 2, y1 + uy * L / 2, L / 2 + 12);
+  const hw = C.laser.width / 2;
+  for (let k = 0; k < n; k++) {                            // piercing: everything along the line
+    const e = enemies[qBuf[k]];
+    if (!e.active) continue;
+    const tt = clamp((e.x - x1) * ux + (e.y - y1) * uy, 0, L);
+    const px = x1 + ux * tt - e.x, py = y1 + uy * tt - e.y, rr = hw + e.r;
+    if (px * px + py * py < rr * rr) damageEnemy(e, C.laser.damage);
+  }
+}
+function updateWeapons(dt) {
+  // Spitter diminishing returns: past softCap spitters, each one fires slower, so total fire rate grows ~ n^(1-falloff)
+  let nSp = 0;
+  for (let i = 0; i < segs.length; i++) if (segs[i].type === 'spitter') nSp++;
+  const spInt = C.spitter.interval * Math.pow(Math.max(1, nSp / C.spitter.softCap), C.spitter.falloff);
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    s.cd -= dt;
+    if (s.type === 'spitter') {
+      if (s.cd <= 0) {
+        const t = nearestEnemy(s.x, s.y, C.spitter.range);
+        if (t) { fireBolt(s.x, s.y, t.x, t.y); s.cd = spInt; } else s.cd = 0;
+      }
+    } else {                                              // spike / mace: contact damage with per-enemy cooldown
+      const cfg = s.type === 'mace' ? C.mace : C.spike;
+      const sr = s.type === 'mace' ? 4.5 : 3.5;
+      const n = hashQuery(s.x, s.y, sr + 10);
+      for (let k = 0; k < n; k++) {
+        const e = enemies[qBuf[k]];
+        if (!e.active || e.spikeT > 0) continue;
+        const rr = sr + e.r, dx = e.x - s.x, dy = e.y - s.y;
+        if (dx * dx + dy * dy < rr * rr) { e.spikeT = cfg.hitInterval; damageEnemy(e, cfg.damage); }
+      }
+    }
+  }
+}
+function updateBolts(dt) {
+  for (let i = 0; i < bolts.length; i++) {
+    const b = bolts[i];
+    if (!b.active) continue;
+    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+    if (b.life <= 0 || b.x < 0 || b.y < 0 || b.x > AW || b.y > AH) { b.active = false; continue; }
+    const n = hashQuery(b.x, b.y, 12);
+    for (let k = 0; k < n; k++) {
+      const e = enemies[qBuf[k]];
+      if (!e.active) continue;
+      const rr = e.r + 2, dx = e.x - b.x, dy = e.y - b.y;
+      if (dx * dx + dy * dy < rr * rr) { b.active = false; damageEnemy(e, C.spitter.damage); break; }
+    }
+  }
+  for (const bm of beams) if (bm.active && (bm.life -= dt) <= 0) bm.active = false;
+}
+function updateShedSegs(dt) {
+  for (let i = shedSegs.length - 1; i >= 0; i--) {
+    const s = shedSegs[i];
+    s.t -= dt;
+    if (s.t > 0) continue;
+    // explosion: damage enemies in radius, shake, particles
+    const n = hashQuery(s.x, s.y, C.shed.radius + 10);
+    for (let k = 0; k < n; k++) {
+      const e = enemies[qBuf[k]];
+      if (!e.active) continue;
+      const rr = C.shed.radius + e.r, dx = e.x - s.x, dy = e.y - s.y;
+      if (dx * dx + dy * dy < rr * rr) damageEnemy(e, C.shed.damage);
+    }
+    spawnRing(s.x, s.y, 4, C.shed.radius + 4, 0.3, '#FFF3B0');
+    burst(s.x, s.y, 14, '#FFF3B0', 80, 0.4);
+    shake = Math.max(shake, C.shed.shake);
+    shedSegs.splice(i, 1);
+  }
+}
+
+/* ===================== COLLISION (head / body / blocks) ===================== */
+function headCollisions() {
+  const hr = C.snake.headR;
+  const n = hashQuery(head.x, head.y, hr + 18);
+  for (let k = 0; k < n; k++) {
+    const e = enemies[qBuf[k]];
+    if (!e.active) continue;
+    const rr = e.r + hr, dx = e.x - head.x, dy = e.y - head.y;
+    if (dx * dx + dy * dy >= rr * rr) continue;
+    if (e.owner >= 0) {                                  // touching a rival snake: lose segments, it recoils
+      if (head.invuln <= 0) { rivals[e.owner].recoil = C.rival.recoil; hurtHead(e.seg === 0 ? C.rival.headDamage : C.rival.bodyDamage); if (segs.length === 0) deathMsg = 'A RIVAL SNAKE GOT YOU'; }
+      if (S !== 'play') return;
+      continue;
+    }
+    if (e.boss) {
+      if (C.boss.lethal) { killHead('THE BOSS CRUSHED YOU'); return; }          // DEFEAT: boss touches the head
+      if (e.touchCd <= 0 && head.invuln <= 0) { e.touchCd = C.boss.touchCooldown; hurtHead(C.boss.touchDamage, C.boss.hitInvuln, true);
+        const kd = Math.hypot(dx, dy) || 1;               // knock the boss back so it can't sit on you
+        e.x = clamp(e.x + dx / kd * 26, 14, AW - 14); e.y = clamp(e.y + dy / kd * 26, 14, AH - 14); }
+    } else {                                             // swarmer is spent when it bites
+      if (head.invuln <= 0) { hurtHead(); killEnemy(e, false); }   // during invulnerability they pass through and keep chasing
+    }
+    if (S !== 'play') return;
+  }
+  // biting own body: stun, no damage. (Only 20 segments, so a plain loop is fine here.)
+  if (head.stun <= 0 && head.grace <= 0) {
+    const rr = hr + C.snake.segR + 0.5;
+    for (let i = C.snake.selfSkip; i < segs.length; i++) {
+      const dx = segs[i].x - head.x, dy = segs[i].y - head.y;
+      if (dx * dx + dy * dy < rr * rr) {
+        sfx('stun'); head.stun = C.snake.stunTime; head.grace = C.snake.stunTime + C.snake.stunGrace;
+        burst(head.x, head.y, 6, '#8FB8FF', 30, 0.3);
+        break;
+      }
+    }
+  }
+}
+function resolveBlocks() {                               // boss walls: push the head out of rectangles
+  const hr = C.snake.headR;
+  for (const b of blocks) {
+    const cx = clamp(head.x, b.x, b.x + b.s), cy = clamp(head.y, b.y, b.y + b.s);
+    let dx = head.x - cx, dy = head.y - cy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 >= hr * hr) continue;
+    if (C.boss.wallsLethal && b.warn <= 0) { killHead('YOU HIT A BOSS WALL'); return; }   // DEFEAT: head touches a boss wall (new walls flash orange first and are harmless)
+    if (d2 > 0.0001) { const d = Math.sqrt(d2); head.x += dx / d * (hr - d); head.y += dy / d * (hr - d); }
+    else {                                               // centre inside the block: exit via nearest face
+      const l = head.x - b.x, r = b.x + b.s - head.x, t = head.y - b.y, bt = b.y + b.s - head.y;
+      const m = Math.min(l, r, t, bt);
+      if (m === l) head.x = b.x - hr; else if (m === r) head.x = b.x + b.s + hr;
+      else if (m === t) head.y = b.y - hr; else head.y = b.y + b.s + hr;
+    }
+  }
+  head.x = clamp(head.x, hr, AW - hr); head.y = clamp(head.y, hr, AH - hr);
+}
+
+/* ===================== PROGRESSION (orbs, xp, cards) ===================== */
+function gainOrb(v) {
+  xp += v * C.orb.xpPerValue;
+  orbCount += v;
+  while (orbCount >= C.snake.orbsPerSeg) {
+    if (segs.length < C.snake.maxSegs) { orbCount -= C.snake.orbsPerSeg; addSegment(); }
+    else { orbCount = Math.min(orbCount, C.snake.orbsPerSeg - 1); break; }
+  }
+  while (xp >= xpNeed) { xp -= xpNeed; level++; sfx('level'); xpNeed = Math.round(C.xp.base * Math.pow(C.xp.mult, level - 1)); if (level % C.xp.cardEvery === 0) pendingLevels++; else showTip(); }
+}
+// Levels without a card choice show a short non-blocking tip instead (beginner explainer).
+const TIPS = [
+  ['RED RIVAL SNAKES HUNT YOUR HEAD. SHOOT OR SPIKE THEM', 'TO KILL THEM. THEY DROP LOTS OF ORBS.'],
+  ['SPIKES HURT ENEMIES THAT TOUCH THEM.', 'KEEP THEM FACING THE SWARM.'],
+  ['PRESS E (OR X) TO SACRIFICE 2 SEGMENTS FOR A HUGE', 'PIERCING LASER IN THE DIRECTION YOU FACE.'],
+  ['PRESS SPACE TO SHED YOUR TAIL. THE PIECES EXPLODE', 'AFTER 1 SECOND AND HURT ENEMIES AROUND THEM.'],
+  ['3 SPIKES IN A ROW FUSE INTO A MACE (2X DAMAGE).', 'MIX SPITTERS AND SPIKES TO CONTROL FUSING.'],
+  ['BITING YOUR OWN BODY LOCKS YOUR STEERING BRIEFLY.', 'TOUCHING THE ORANGE ARENA EDGE KILLS YOU. STAY INSIDE.'],
+  ['EVERY ' + C.snake.orbsPerSeg + ' ORBS ADD A SEGMENT. MORE SEGMENTS = MORE', 'FIREPOWER, BUT A LONGER BODY IS HARDER TO STEER.'],
+  ['THE BOSS TELEPORTS NEAR YOU. AN ORANGE RING SHOWS', 'WHERE IT LANDS. BOSS OR BOSS WALL ON YOUR HEAD = DEFEAT.']
+];
+function showTip() { tipLines = TIPS[tipIdx++ % TIPS.length]; tipT = 7; lvlBannerT = 1.5; }
+function updateOrbs(dt) {
+  const m2 = C.orb.magnet * C.orb.magnet, p2 = C.orb.pickR * C.orb.pickR;
+  for (let i = 0; i < orbs.length; i++) {
+    const o = orbs[i];
+    if (!o.active) continue;
+    const dx = head.x - o.x, dy = head.y - o.y, d2 = dx * dx + dy * dy;
+    if (d2 < p2) { o.active = false; sfx('orb'); gainOrb(C.orb.value + P.orb); continue; }
+    if (d2 < m2) { const d = Math.sqrt(d2); o.x += dx / d * C.orb.magnetSpeed * dt; o.y += dy / d * C.orb.magnetSpeed * dt; }
+  }
+}
+const CARDS = [
+  { id:'spitter', name:['SPITTER','SEGMENTS'], desc:['NEW SEGMENTS','SHOOT BOLTS'], icon:'spitter',
+    tip:['SPITTER: AUTO-SHOOTS THE NEAREST ENEMY IN RANGE.', 'SAFE DAMAGE FROM A DISTANCE, BUT SLOW.'] },
+  { id:'spike',   name:['SPIKE','SEGMENTS'],   desc:['NEW SEGMENTS','CUT ON TOUCH'], icon:'spike',
+    tip:['SPIKE: HURTS ENEMIES THAT TOUCH YOUR BODY.', 'BEST IN A CROWD. 3 IN A ROW FUSE INTO A MACE.'] },
+  { id:'seg',     name:['+1 SEGMENT','NOW'],   desc:['GROW AT ONCE'], icon:null,
+    tip:['GROW BY ONE SEGMENT RIGHT NOW.', 'MORE FIREPOWER, BUT HARDER TO STEER.'] },
+  { id:'speed',   name:['+10% SPEED'],         desc:['MOVE FASTER'], icon:null,
+    tip:['+10% MOVE SPEED: OUTRUN THE SWARM AND GRAB ORBS.', 'YOUR TURN RATE STAYS THE SAME.'] },
+  { id:'turn',    name:['+15% TURN','RATE'],   desc:['TIGHTER CURVES'], icon:null,
+    tip:['+15% TURN RATE: CURVE TIGHTER AROUND ENEMIES', 'AND AVOID BITING YOUR OWN BODY.'] },
+  { id:'orb',     name:['+1 ORB VALUE'],       desc:['EVERY ORB IS','WORTH MORE'], icon:null,
+    tip:['EVERY ORB COUNTS +1: FASTER GROWTH AND FASTER', 'LEVELS (' + C.snake.orbsPerSeg + ' ORB VALUE = 1 NEW SEGMENT).'] }
+];
+function openCards() {
+  const pool = CARDS.slice();
+  cardChoices = [];
+  for (let i = 0; i < 3; i++) cardChoices.push(pool.splice((rnd() * pool.length) | 0, 1)[0]);
+  S = 'levelup'; lockT = 0.4; sel = 1;
+}
+function applyCard(c) {
+  switch (c.id) {
+    case 'spitter': P.weapon = 'spitter'; break;
+    case 'spike':   P.weapon = 'spike'; break;
+    case 'seg':     if (segs.length < C.snake.maxSegs) addSegment(); break;
+    case 'speed':   P.speed += C.snake.passiveSpeed; break;
+    case 'turn':    P.turn += C.snake.passiveTurn; break;
+    case 'orb':     P.orb += 1; break;
+  }
+  pendingLevels--; sfx('pick');
+  S = 'play';
+}
+let newBest = false, maxLen = 0, finalScore = 0, menuSel = 0, endT = 0;
+function endRun(result) {
+  if (S === 'win' || S === 'lose') return;
+  S = result; menuSel = 0; endT = 0;
+  finalScore = kills * 10 + level * 25 + maxLen * 5 + (result === 'win' ? 1000 : 0);
+  newBest = false;
+  if (!autopilot) {                                           // the bot's runs never touch your records
+    save.runs++; if (result === 'win') save.wins++;
+    save.bestKills = Math.max(save.bestKills, kills);
+    if (finalScore > save.bestScore) { save.bestScore = finalScore; newBest = true; }
+    writeSave();
+  }
+  if (result === 'win') sfx('win');
+}
+function pauseGame() { if (S === 'play') { S = 'paused'; menuSel = 0; sfx('back'); } }
+
+/* ===================== FX ===================== */
+function burst(x, y, n, color, speed, life) {
+  for (let i = 0; i < n; i++) {
+    const p = takeFree(parts);
+    if (!p) return;
+    const a = rnd() * TAU, v = speed * (0.3 + rnd() * 0.7);
+    p.active = true; p.x = x; p.y = y; p.vx = Math.cos(a) * v; p.vy = Math.sin(a) * v;
+    p.life = p.max = life * (0.6 + rnd() * 0.6); p.color = color; p.size = rnd() < 0.3 ? 2 : 1;
+  }
+}
+function spawnRing(x, y, r0, r1, life, color) {
+  const r = takeFree(rings);
+  if (!r) return;
+  r.active = true; r.x = x; r.y = y; r.r = r0; r.grow = (r1 - r0) / life; r.life = r.max = life; r.color = color;
+}
+function updateFx(dt) {
+  for (const p of parts) {
+    if (!p.active) continue;
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.94; p.vy *= 0.94;
+    if ((p.life -= dt) <= 0) p.active = false;
+  }
+  for (const r of rings) {
+    if (!r.active) continue;
+    r.r += r.grow * dt;
+    if ((r.life -= dt) <= 0) r.active = false;
+  }
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    b.life -= dt; if (b.warn > 0) b.warn -= dt;
+    if (b.life <= 0) blocks.splice(i, 1);
+  }
+  shake = Math.max(0, shake - C.fx.shakeDecay * dt);
+  if (bannerT > 0) bannerT -= dt;
+  if (lvlBannerT > 0) lvlBannerT -= dt;
+  if (tipT > 0) tipT -= dt;
+  if (rivalBannerT > 0) rivalBannerT -= dt;
+}
+
+/* ===================== GAME LOOP: update ===================== */
+function updateCamera(dt) {
+  const k = 1 - Math.exp(-C.camera.follow * dt);
+  cam.x += (head.x - cam.x) * k; cam.y += (head.y - cam.y) * k;
+  cam.x = clamp(cam.x, VW / 2, AW - VW / 2); cam.y = clamp(cam.y, VH / 2, AH - VH / 2);
+}
+function simulate(dt) {
+  if (hitstop > 0) {                                     // freeze-frame
+    hitstop -= dt;
+    if (hitstop <= 0 && pendingWin) endRun('win');
+    return;
+  }
+  runT += dt;
+  if (shedCd > 0) shedCd -= dt;
+  if (laserCd > 0) laserCd -= dt;
+  if (took('Space') || took('PadA')) doShed();
+  if (took('KeyE') || took('PadX')) doLaser();
+  updateSpawning(dt);
+  if (autopilot) autopilotThink();
+  updateHead(dt);
+  if (S !== 'play') return;                              // head hit a lethal wall
+  if (C.arena.lethalBorder && Math.min(head.x, AW - head.x, head.y, AH - head.y) < 28) sfx('warn');
+  updateSegments();
+  updateEnemies(dt);
+  updateRivals(dt);
+  rebuildHash();                                         // one hash serves every query below
+  headCollisions();
+  if (S !== 'play') return;
+  updateWeapons(dt);
+  updateBolts(dt);
+  updateShedSegs(dt);
+  updateOrbs(dt);
+  updateFx(dt);
+  updateCamera(dt);
+  if (pendingLevels > 0 && S === 'play') openCards();
+}
+/* ---- menus: keyboard / pad / mouse / touch share one tiny menu system ---- */
+const IN_APP = /SerpentSwarmApp/.test(navigator.userAgent);   // running inside the Android APK wrapper
+const MX = VW / 2 - 72, MW = 144, MBAR = 74;
+const MENUS = {
+  title: () => [
+    { label: 'PLAY', act: () => { autopilot = false; newRun(); } },
+    { label: 'HOW TO PLAY', act: () => openGuide('title') },
+    { label: 'MUSIC', vol: 'musicVol' },
+    { label: 'SOUND FX', vol: 'sfxVol' },
+    ...(IN_APP ? [] : [{ label: 'FULLSCREEN', act: () => toggleFullscreen() }]),
+    { label: 'WATCH THE BOT', act: () => { autopilot = true; newRun(); } },
+  ],
+  paused: () => [
+    { label: 'RESUME', act: () => { S = 'play'; } },
+    { label: 'HOW TO PLAY', act: () => openGuide('paused') },
+    { label: 'MUSIC', vol: 'musicVol' },
+    { label: 'SOUND FX', vol: 'sfxVol' },
+    ...(IN_APP ? [] : [{ label: 'FULLSCREEN', act: () => toggleFullscreen() }]),
+    { label: 'RESTART RUN', act: () => { newRun(); } },
+    { label: 'QUIT TO TITLE', act: () => { autopilot = false; S = 'title'; menuSel = 0; } },
+  ],
+  end: () => [
+    { label: 'PLAY AGAIN', act: () => { newRun(); } },
+    { label: 'MAIN MENU', act: () => { autopilot = false; S = 'title'; menuSel = 0; } },
+  ],
+};
+const menuRowY = (y0, i) => y0 + i * 11;
+function updateMenu(items, y0) {
+  const n = items.length;
+  if (menuSel >= n) menuSel = 0;
+  const inRow = (p, i) => p.x >= MX && p.x < MX + MW && p.y >= menuRowY(y0, i) - 2 && p.y < menuRowY(y0, i) + 9;
+  if (mouseMoved) { mouseMoved = false; for (let i = 0; i < n; i++) if (inRow(mouse, i) && menuSel !== i) { menuSel = i; sfx('move'); } }
+  if (took('ArrowDown') || took('KeyS') || took('PadDown')) { menuSel = (menuSel + 1) % n; sfx('move'); }
+  if (took('ArrowUp') || took('KeyW') || took('PadUp')) { menuSel = (menuSel + n - 1) % n; sfx('move'); }
+  const it = items[menuSel];
+  if (it.vol) {
+    if (took('ArrowLeft') || took('KeyA') || took('PadLeft')) adjustVol(it.vol, -1);
+    if (took('ArrowRight') || took('KeyD') || took('PadRight') || took('Enter') || took('Space') || took('PadA')) adjustVol(it.vol, 1);
+  } else if (took('Enter') || took('Space') || took('PadA')) { sfx('select'); it.act(); return; }
+  if (clicked) {
+    for (let i = 0; i < n; i++) {
+      if (!inRow(clicked, i)) continue;
+      menuSel = i;
+      const c = items[i];
+      if (c.vol) {
+        if (clicked.x >= MX + MBAR && clicked.x < MX + MBAR + 60) {
+          const k = Math.floor((clicked.x - MX - MBAR) / 6) + 1;
+          save[c.vol] = save[c.vol] === k ? k - 1 : k; applyVolumes(); writeSave(); sfx('move');
+        } else adjustVol(c.vol, save[c.vol] >= 10 ? -10 : 1);
+      } else { sfx('select'); c.act(); return; }
+    }
+  }
+}
+function update(dt) {
+  titleT += dt;
+  if (toastT > 0) toastT -= dt;
+  switch (S) {
+    case 'title':
+      if (took('KeyB')) { autopilot = true; newRun(); }
+      else if (took('KeyH') || took('PadY')) openGuide('title');
+      else updateMenu(MENUS.title(), 50);
+      break;
+    case 'play':
+      if (took('KeyB')) autopilot = !autopilot;
+      if (took('Escape') || took('KeyP') || took('PadStart')) { pauseGame(); break; }
+      simulate(dt);
+      break;
+    case 'paused':
+      if (took('KeyH') || took('PadY')) openGuide('paused');
+      else if (took('Escape') || took('KeyP') || took('PadStart') || took('PadB')) { S = 'play'; sfx('back'); }
+      else updateMenu(MENUS.paused(), 50);
+      break;
+    case 'levelup': updateCards(dt); break;
+    case 'guide': updateGuide(dt); break;
+    case 'win': case 'lose':
+      updateFx(dt); updateCamera(dt);
+      if (autopilot && (cardWait += dt) > 4) { cardWait = 0; newRun(); }   // bot restarts by itself
+      if (took('KeyB')) autopilot = false;
+      if (took('KeyR') || took('PadStart')) newRun();
+      else if ((endT += dt) > 0.8) updateMenu(MENUS.end(), 118);   // short lock so button-mashing can't skip the result
+      break;
+  }
+}
+const CARD_W = 92, CARD_H = 82, CARD_Y = 50;
+const cardX = i => 16 + i * 98;
+function updateCards(dt) {
+  if (lockT > 0) lockT -= dt;
+  if (mouseMoved) {
+    mouseMoved = false;
+    for (let i = 0; i < 3; i++) if (mouse.x >= cardX(i) && mouse.x < cardX(i) + CARD_W && mouse.y >= CARD_Y && mouse.y < CARD_Y + CARD_H) sel = i;
+  }
+  if (lockT > 0) { clicked = null; cardWait = 0.6; return; }
+  if (autopilot) { if ((cardWait -= dt) <= 0) applyCard(cardChoices[autopilotPickCard()]); return; }
+  if (took('ArrowLeft') || took('KeyA') || took('PadLeft')) sel = (sel + 2) % 3;
+  if (took('ArrowRight') || took('KeyD') || took('PadRight')) sel = (sel + 1) % 3;
+  let pick = -1;
+  if (took('Digit1') || took('Numpad1')) pick = 0;
+  if (took('Digit2') || took('Numpad2')) pick = 1;
+  if (took('Digit3') || took('Numpad3')) pick = 2;
+  if (took('Enter') || took('PadA')) pick = sel;
+  if (clicked) {
+    for (let i = 0; i < 3; i++) if (clicked.x >= cardX(i) && clicked.x < cardX(i) + CARD_W && clicked.y >= CARD_Y && clicked.y < CARD_Y + CARD_H) pick = i;
+  }
+  if (pick >= 0) applyCard(cardChoices[pick]);
+}
+
+/* ===================== UI / RENDER ===================== */
+// 3x5 pixel font (each row = 3 bits). Crisp at any integer scale, unlike canvas text.
+const FONT = {
+ A:[2,5,7,5,5],B:[6,5,6,5,6],C:[3,4,4,4,3],D:[6,5,5,5,6],E:[7,4,6,4,7],F:[7,4,6,4,4],G:[3,4,5,5,3],
+ H:[5,5,7,5,5],I:[7,2,2,2,7],J:[1,1,1,5,2],K:[5,5,6,5,5],L:[4,4,4,4,7],M:[5,7,7,5,5],N:[6,5,5,5,5],
+ O:[2,5,5,5,2],P:[6,5,6,4,4],Q:[2,5,5,6,3],R:[6,5,6,5,5],S:[3,4,2,1,6],T:[7,2,2,2,2],U:[5,5,5,5,7],
+ V:[5,5,5,5,2],W:[5,5,7,7,5],X:[5,5,2,5,5],Y:[5,5,2,2,2],Z:[7,1,2,4,7],
+ 0:[7,5,5,5,7],1:[2,6,2,2,7],2:[6,1,2,4,7],3:[6,1,2,1,6],4:[5,5,7,1,1],5:[7,4,6,1,6],6:[3,4,7,5,7],
+ 7:[7,1,2,2,2],8:[7,5,7,5,7],9:[7,5,7,1,6],
+ '=':[0,7,0,7,0],'(':[1,2,2,2,1],')':[4,2,2,2,4],'<':[1,2,4,2,1],'>':[4,2,1,2,4],':':[0,2,0,2,0],'/':[1,1,2,4,4],'+':[0,2,7,2,0],'-':[0,0,7,0,0],'%':[5,1,2,4,5],'.':[0,0,0,0,2],
+ '!':[2,2,2,0,2],',':[0,0,0,2,4],"'":[2,2,0,0,0],'?':[6,1,2,0,2],' ':[0,0,0,0,0]
+};
+function textW(s, sc) { return String(s).length * 4 * sc - sc; }
+function text(s, x, y, color, sc, shadow) {
+  s = String(s).toUpperCase(); sc = sc || 1; x = R(x); y = R(y);
+  for (let pass = shadow === false ? 1 : 0; pass < 2; pass++) {
+    g.fillStyle = pass === 0 ? COL.dark : color;
+    const ox = pass === 0 ? sc : 0, oy = pass === 0 ? sc : 0;
+    for (let i = 0; i < s.length; i++) {
+      const gl = FONT[s[i]];
+      if (!gl) continue;
+      for (let r = 0; r < 5; r++) for (let c = 0; c < 3; c++)
+        if (gl[r] & (4 >> c)) g.fillRect(x + i * 4 * sc + c * sc + ox, y + r * sc + oy, sc, sc);
+    }
+  }
+}
+const textC = (s, cx, y, color, sc, shadow) => text(s, cx - textW(s, sc || 1) / 2, y, color, sc, shadow);
+
+function box(cx, cy, w, h, fill, outline) {              // centred rect with 1px dark outline
+  const x = R(cx) - ((w - 1) >> 1), y = R(cy) - ((h - 1) >> 1);
+  g.fillStyle = outline || COL.dark; g.fillRect(x - 1, y - 1, w + 2, h + 2);
+  g.fillStyle = fill; g.fillRect(x, y, w, h);
+}
+function diamond(cx, cy, r, fill) {
+  cx = R(cx); cy = R(cy);
+  g.fillStyle = COL.dark;
+  for (let dy = -r - 1; dy <= r + 1; dy++) { const hw = r + 1 - Math.abs(dy); g.fillRect(cx - hw, cy + dy, hw * 2 + 1, 1); }
+  g.fillStyle = fill;
+  for (let dy = -r; dy <= r; dy++) { const hw = r - Math.abs(dy); g.fillRect(cx - hw, cy + dy, hw * 2 + 1, 1); }
+}
+function drawWeapon(type, x, y, over) {
+  const col = over || WEAPONS[type].color;
+  if (type === 'spitter') box(x, y, 5, 5, col);
+  else if (type === 'laser') { box(x, y, 7, 7, col); g.fillStyle = '#FFFFFF'; g.fillRect(R(x) - 1, R(y) - 1, 3, 3); }
+  else if (type === 'spike') diamond(x, y, 3, col);
+  else diamond(x, y, 4, col);
+}
+function ring(x, y, r, color) {
+  g.fillStyle = color;
+  const n = Math.max(10, (r * 1.6) | 0);
+  for (let i = 0; i < n; i++) { const a = i / n * TAU; g.fillRect(R(x + Math.cos(a) * r), R(y + Math.sin(a) * r), 1, 1); }
+}
+
+function drawFloor(cx, cy) {
+  g.fillStyle = COL.out; g.fillRect(-4, -4, VW + 8, VH + 8);
+  const x0 = VW / 2 - cx, y0 = VH / 2 - cy;
+  g.fillStyle = COL.bg; g.fillRect(x0, y0, AW, AH);
+  g.fillStyle = COL.grid;
+  for (let x = 0; x <= AW; x += 32) g.fillRect(x0 + x, y0, 1, AH);
+  for (let y = 0; y <= AH; y += 32) g.fillRect(x0, y0 + y, AW, 1);
+  g.fillStyle = COL.border;
+  g.fillRect(x0 - 2, y0 - 2, AW + 4, 2); g.fillRect(x0 - 2, y0 + AH, AW + 4, 2);
+  g.fillRect(x0 - 2, y0 - 2, 2, AH + 4); g.fillRect(x0 + AW, y0 - 2, 2, AH + 4);
+}
+
+function drawWorld() {
+  const sx = shake > 0 ? R((rnd() * 2 - 1) * shake) : 0, sy = shake > 0 ? R((rnd() * 2 - 1) * shake) : 0;
+  const ox = R(VW / 2 - cam.x) + sx, oy = R(VH / 2 - cam.y) + sy;
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.fillStyle = COL.out; g.fillRect(0, 0, VW, VH);
+  g.setTransform(1, 0, 0, 1, ox, oy);
+  // floor in world space
+  g.fillStyle = COL.bg; g.fillRect(0, 0, AW, AH);
+  g.fillStyle = COL.grid;
+  const gx0 = Math.max(0, Math.floor((cam.x - VW / 2) / 32) * 32), gx1 = Math.min(AW, cam.x + VW / 2 + 32);
+  const gy0 = Math.max(0, Math.floor((cam.y - VH / 2) / 32) * 32), gy1 = Math.min(AH, cam.y + VH / 2 + 32);
+  for (let x = gx0; x <= gx1; x += 32) g.fillRect(x, gy0, 1, gy1 - gy0);
+  for (let y = gy0; y <= gy1; y += 32) g.fillRect(gx0, y, gx1 - gx0, 1);
+  if (C.arena.lethalBorder) {                           // deadly edge: orange (= danger colour) with a faint inner warning band
+    g.fillStyle = '#2a1d1a';
+    g.fillRect(0, 0, AW, 6); g.fillRect(0, AH - 6, AW, 6); g.fillRect(0, 0, 6, AH); g.fillRect(AW - 6, 0, 6, AH);
+  }
+  g.fillStyle = C.arena.lethalBorder ? COL.orange : COL.border;
+  g.fillRect(-2, -2, AW + 4, 2); g.fillRect(-2, AH, AW + 4, 2); g.fillRect(-2, -2, 2, AH + 4); g.fillRect(AW, -2, 2, AH + 4);
+
+  // boss walls
+  for (const b of blocks) {
+    if (b.life < 3 && ((b.life * 8) | 0) % 2) continue;
+    g.fillStyle = COL.dark; g.fillRect(R(b.x) - 1, R(b.y) - 1, b.s + 2, b.s + 2);
+    g.fillStyle = b.warn > 0 ? COL.orange : COL.block; g.fillRect(R(b.x), R(b.y), b.s, b.s);
+  }
+  // orbs
+  for (const o of orbs) if (o.active) box(o.x, o.y, 3, 3, COL.orb);
+  // shed segments waiting to explode (flash faster as the fuse burns down)
+  for (const s of shedSegs) {
+    const ph = (C.shed.fuse - s.t) / C.shed.fuse;
+    const on = ((ph * (6 + ph * 22)) | 0) % 2 === 0;
+    drawWeapon(s.type, s.x, s.y, on ? '#FFFFFF' : COL.orange);
+  }
+  // enemies (muted; white on hit, orange when attacking)
+  for (let i = 0; i < MAXE; i++) {
+    const e = enemies[i];
+    if (!e.active) continue;
+    const col = e.flash > 0 ? '#FFFFFF' : e.atk > 0 ? COL.orange : (e.owner >= 0 ? (e.seg === 0 ? COL.rivalHead : COL.rival) : e.boss ? COL.boss : COL.enemy);
+    if (e.boss) {
+      box(e.x, e.y, 25, 25, col);
+      g.fillStyle = COL.dark; g.fillRect(R(e.x) - 7, R(e.y) - 5, 4, 4); g.fillRect(R(e.x) + 4, R(e.y) - 5, 4, 4);
+    } else if (e.owner >= 0 && e.seg === 0) {
+      box(e.x, e.y, 7, 7, col);
+      const r = rivals[e.owner], dx = Math.cos(r.ang), dy = Math.sin(r.ang);
+      g.fillStyle = COL.dark;
+      for (const sd of [-1, 1]) g.fillRect(R(e.x + dx * 1.5 - dy * 2 * sd), R(e.y + dy * 1.5 + dx * 2 * sd), 1, 1);
+    } else box(e.x, e.y, 5, 5, col);
+  }
+  // boss teleport marker: orange ring where it will land
+  if (boss && boss.active && boss.tele > 0) {
+    const f = boss.tele / C.boss.telegraph;
+    ring(boss.tx, boss.ty, C.boss.slamRadius, COL.orange);
+    ring(boss.tx, boss.ty, C.boss.slamRadius * (1 - f) + 2, ((boss.tele * 14) | 0) % 2 ? '#FFFFFF' : COL.orange);
+  }
+  // bolts + laser beams
+  for (const b of bolts) if (b.active) box(b.x, b.y, 2, 2, '#D9FF8A');
+  for (const bm of beams) {
+    if (!bm.active) continue;
+    const L = Math.hypot(bm.x2 - bm.x1, bm.y2 - bm.y1), n = (L / 2) | 0;
+    const w = Math.max(2, R(bm.w * clamp(bm.life / C.laser.beamLife, 0, 1))), wi = Math.max(1, (w / 3) | 0);
+    for (let pass = 0; pass < 2; pass++) {
+      const ww = pass ? wi : w; g.fillStyle = pass ? '#FFFFFF' : '#6FF0FF';
+      for (let i = 0; i <= n; i++) g.fillRect(R(bm.x1 + (bm.x2 - bm.x1) * i / n) - (ww >> 1), R(bm.y1 + (bm.y2 - bm.y1) * i / n) - (ww >> 1), ww, ww);
+    }
+  }
+  // snake: tail first, head last so the head is always on top
+  for (let i = segs.length - 1; i >= 0; i--) drawWeapon(segs[i].type, segs[i].x, segs[i].y);
+  drawHead();
+  // fx
+  for (const p of parts) if (p.active) { g.fillStyle = p.color; g.fillRect(R(p.x), R(p.y), p.size, p.size); }
+  for (const r of rings) if (r.active) ring(r.x, r.y, r.r, r.color);
+  g.setTransform(1, 0, 0, 1, 0, 0);
+}
+function drawHead() {
+  const blink = head.invuln > 0 && ((head.invuln * 16) | 0) % 2 === 0;
+  if (blink) return;
+  const col = head.hurtFlash > 0 ? COL.orange : head.stun > 0 ? '#8FB8FF' : COL.head;
+  box(head.x, head.y, 7, 7, col);
+  const dx = Math.cos(head.ang), dy = Math.sin(head.ang);          // two eyes on the facing side
+  g.fillStyle = COL.dark;
+  for (const s of [-1, 1]) g.fillRect(R(head.x + dx * 1.5 - dy * 2 * s), R(head.y + dy * 1.5 + dx * 2 * s), 1, 1);
+  if (head.stun > 0) { g.fillStyle = '#FFFFFF'; const a = head.t * 14; g.fillRect(R(head.x + Math.cos(a) * 7), R(head.y - 6 + Math.sin(a) * 2), 1, 1); }
+}
+
+const fmt = t => { const m = Math.floor(t / 60), s = Math.floor(t % 60); return m + ':' + (s < 10 ? '0' : '') + s; };
+function drawHUD() {
+  text(fmt(runT), 4, 4, COL.ui, 2);
+  text('SEG ' + segs.length + (isFinite(C.snake.maxSegs) ? '/' + C.snake.maxSegs : ''), 4, 17, COL.ui, 1);
+  for (let i = 0; i < C.snake.orbsPerSeg; i++) {            // orbs towards next segment
+    g.fillStyle = COL.dark; g.fillRect(4 + i * 5, 24, 5, 4);
+    g.fillStyle = i < orbCount ? COL.orb : '#2a3040'; g.fillRect(5 + i * 5, 25, 3, 2);
+  }
+  if (autopilot) text('AUTOPILOT: B TO TAKE OVER', VW - 4 - textW('AUTOPILOT: B TO TAKE OVER', 1), 12, COL.orange, 1);
+  text('KILLS ' + kills, VW - 4 - textW('KILLS ' + kills, 1), 4, COL.dim, 1);
+  // XP bar
+  g.fillStyle = COL.dark; g.fillRect(0, VH - 5, VW, 5);
+  g.fillStyle = '#5B7CFF'; g.fillRect(1, VH - 4, R((VW - 2) * clamp(xp / xpNeed, 0, 1)), 3);
+  text('LV ' + level, 4, VH - 13, COL.ui, 1);
+  // next-segment weapon
+  const lOk = laserCd <= 0 && segs.length > C.laser.cost;
+  text('E:LASER -' + C.laser.cost, 34, VH - 13, lOk ? '#6FF0FF' : COL.dim, 1);
+  if (!bossSpawned) text('BOSS IN ' + fmt(Math.max(0, C.boss.time - runT)), 4, 31, COL.dim, 1);
+  text('NEXT', VW / 2 + 14, VH - 13, COL.dim, 1);
+  drawWeapon(P.weapon, VW / 2 + 38, VH - 11);
+  // shed cooldown
+  const ready = shedCd <= 0, frac = ready ? 1 : 1 - shedCd / C.shed.cooldown;
+  const bx = VW - 48, by = VH - 12;
+  text(ready ? 'SPACE:SHED' : 'SHED', ready ? VW - 4 - textW('SPACE:SHED', 1) : bx - 20, VH - 13 - (ready ? 0 : 0), ready ? COL.head : COL.dim, 1);
+  if (!ready) { g.fillStyle = COL.dark; g.fillRect(bx - 1, by - 1, 46, 7); g.fillStyle = '#2a3040'; g.fillRect(bx, by, 44, 5); g.fillStyle = COL.orange; g.fillRect(bx, by, R(44 * frac), 5); }
+  // boss bar
+  if (boss && boss.active) {
+    const w = 160, x = (VW - w) / 2;
+    textC('MINI-BOSS', VW / 2, 3, COL.ui, 1);
+    g.fillStyle = COL.dark; g.fillRect(x - 1, 10, w + 2, 6);
+    g.fillStyle = '#3a2a2e'; g.fillRect(x, 11, w, 4);
+    g.fillStyle = '#C8505F'; g.fillRect(x, 11, R(w * clamp(boss.hp / boss.maxHp, 0, 1)), 4);
+  }
+  if (C.arena.lethalBorder && S === 'play' && Math.min(head.x, AW - head.x, head.y, AH - head.y) < 28 && ((runT * 6) | 0) % 2 === 0)
+    textC('DANGER: ARENA EDGE!', VW / 2, 44, COL.orange, 1);
+  if (lvlBannerT > 0 && S === 'play') textC('LEVEL ' + level + '!', VW / 2, 50, COL.head, 2);
+  if (tipT > 0 && S === 'play') {                        // beginner tip toast
+    g.fillStyle = COL.dark; g.fillRect(14, 120, 292, 34);
+    g.fillStyle = '#1b2030'; g.fillRect(15, 121, 290, 32);
+    g.fillStyle = COL.orb; g.fillRect(15, 121, 2, 32);
+    text('TIP', 22, 124, COL.orb, 1);
+    for (let k = 0; k < tipLines.length; k++) text(tipLines[k], 22, 133 + k * 8, COL.ui, 1);
+  }
+  if (rivalBannerT > 0 && ((rivalBannerT * 6) | 0) % 2 === 0) textC('RIVAL SNAKE HUNTING YOU!', VW / 2, 56, COL.rivalHead, 1);
+  if (bannerT > 0 && ((bannerT * 6) | 0) % 2 === 0) textC('THE MINI-BOSS APPROACHES!', VW / 2, 20, COL.orange, 1);
+}
+function dim(a) { g.fillStyle = 'rgba(8,10,16,' + a + ')'; g.fillRect(0, 0, VW, VH); }
+function drawCards() {
+  dim(0.72);
+  textC('LEVEL UP!', VW / 2, 14, COL.head, 3);
+  textC('PICK: 1 2 3, CLICK, OR D-PAD + A', VW / 2, 36, COL.dim, 1);
+  for (let i = 0; i < 3; i++) {
+    const c = cardChoices[i], x = cardX(i), on = sel === i;
+    g.fillStyle = on ? '#FFFFFF' : '#4a5268'; g.fillRect(x - 1, CARD_Y - 1 - (on ? 2 : 0), CARD_W + 2, CARD_H + 2 + (on ? 2 : 0));
+    g.fillStyle = on ? '#2c3348' : '#1f2433'; g.fillRect(x, CARD_Y - (on ? 2 : 0), CARD_W, CARD_H + (on ? 2 : 0));
+    const y = CARD_Y - (on ? 2 : 0);
+    text(String(i + 1), x + 4, y + 4, COL.dim, 1);
+    if (c.icon) drawWeapon(c.icon, x + CARD_W / 2, y + 17);
+    else textC('+', x + CARD_W / 2, y + 13, COL.head, 2);
+    for (let k = 0; k < c.name.length; k++) textC(c.name[k], x + CARD_W / 2, y + 30 + k * 7, COL.ui, 1);
+    for (let k = 0; k < c.desc.length; k++) textC(c.desc[k], x + CARD_W / 2, y + 54 + k * 7, COL.dim, 1);
+  }
+  const tp = cardChoices[sel].tip;                       // plain-language explanation of the highlighted card
+  for (let k = 0; k < tp.length; k++) textC(tp[k], VW / 2, 142 + k * 8, k === 0 ? COL.head : COL.ui, 1);
+}
+function drawMenu(items, y0) {
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i], y = menuRowY(y0, i), on = i === menuSel;
+    if (on) { g.fillStyle = COL.dark; g.fillRect(MX - 1, y - 2, MW + 2, 11); g.fillStyle = '#2c3348'; g.fillRect(MX, y - 1, MW, 9); g.fillStyle = COL.head; g.fillRect(MX, y - 1, 2, 9); }
+    const col = on ? COL.head : COL.ui;
+    if (it.vol) {
+      text(it.label, MX + 8, y, col, 1);
+      const v = save[it.vol];
+      for (let k = 0; k < 10; k++) { g.fillStyle = k < v ? (save.muted ? '#555B6A' : col) : '#3a4152'; g.fillRect(MX + MBAR + k * 6, y + 1, 5, 5); }
+      if (on) { text('<', MX + MBAR - 7, y, col, 1); text('>', MX + MBAR + 61, y, col, 1); }
+    } else textC(it.label, VW / 2, y, col, 1);
+  }
+}
+function drawEnd() {
+  dim(0.78);
+  const win = S === 'win';
+  textC(win ? 'VICTORY!' : 'RUN OVER', VW / 2, 10, win ? COL.head : COL.orange, 4);
+  textC(win ? 'THE MINI-BOSS IS DEAD' : deathMsg, VW / 2, 36, COL.ui, 1);
+  const rows = [['TIME', fmt(runT)], ['KILLS', kills], ['LEVEL', level], ['LONGEST SNAKE', maxLen]];
+  for (let i = 0; i < rows.length; i++) { text(rows[i][0], VW / 2 - 60, 50 + i * 9, COL.dim, 1); const v = String(rows[i][1]); text(v, VW / 2 + 60 - textW(v, 1), 50 + i * 9, COL.ui, 1); }
+  g.fillStyle = '#3a4152'; g.fillRect(VW / 2 - 60, 87, 120, 1);
+  text('SCORE', VW / 2 - 60, 92, COL.head, 1); const sc = String(finalScore); text(sc, VW / 2 + 60 - textW(sc, 2), 90, COL.head, 2);
+  if (autopilot) textC('BOT RUN: NOT SAVED', VW / 2, 106, COL.orange, 1);
+  else if (newBest) { if (((titleT * 3) | 0) % 2 === 0) textC('NEW BEST SCORE!', VW / 2, 106, COL.orange, 1); }
+  else textC('BEST ' + save.bestScore, VW / 2, 106, COL.dim, 1);
+  if (endT > 0.8) drawMenu(MENUS.end(), 118);
+}
+function drawTitle() {
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  drawFloor(AW / 2, AH / 2); dim(0.35);
+  // decorative wandering snake along the bottom
+  for (let i = 15; i >= 0; i--) {
+    const t = titleT * 1.4 - i * 0.22;
+    const x = VW / 2 + Math.sin(t * 0.8) * 130, y = 168 + Math.sin(t * 1.9) * 5;
+    if (i === 0) box(x, y, 7, 7, COL.head); else drawWeapon(i % 4 === 3 ? 'spike' : 'spitter', x, y);
+  }
+  const name = 'SERPENT SWARM';                              // logo: letters bob in a wave
+  for (let i = 0; i < name.length; i++) text(name[i], VW / 2 - textW(name, 4) / 2 + i * 16, 8 + Math.round(Math.sin(titleT * 3 + i * 0.6) * 2), i < 7 ? COL.head : COL.orange, 4);
+  textC('YOUR BODY IS THE WEAPON', VW / 2, 34, COL.dim, 1);
+  drawMenu(MENUS.title(), 50);
+  if (!AUD.ctx) { if (((titleT * 2) | 0) % 2 === 0) textC(touch.enabled ? 'TAP ANYWHERE FOR SOUND' : 'PRESS ANY KEY FOR SOUND', VW / 2, 123, COL.orange, 1); }
+  else if (save.runs === 0) textC('NEW HERE? OPEN HOW TO PLAY FIRST', VW / 2, 123, COL.orb, 1);
+  else textC('BEST ' + save.bestScore + '   WINS ' + save.wins + '   RUNS ' + save.runs, VW / 2, 123, COL.dim, 1);
+  if (touch.enabled) textC('DRAG TO STEER. TAP BUTTONS FOR SHED AND LASER.', VW / 2, 134, COL.ui, 1);
+  else {
+    textC('WASD / ARROWS / STICK: STEER    SPACE: SHED    E: LASER', VW / 2, 134, COL.ui, 1);
+    textC('ESC: PAUSE   M: MUTE   F: FULLSCREEN   H: HELP', VW / 2, 142, COL.dim, 1);
+  }
+  textC('ARENA EDGE, BOSS AND BOSS WALLS ARE DEADLY', VW / 2, 153, COL.orange, 1);
+  text('V1.0', VW - 20, VH - 7, COL.dim, 1);
+}
+function drawPause() {
+  dim(0.7);
+  textC('PAUSED', VW / 2, 10, COL.head, 3);
+  textC('TIME ' + fmt(runT) + '   KILLS ' + kills + '   LEVEL ' + level, VW / 2, 32, COL.dim, 1);
+  drawMenu(MENUS.paused(), 50);
+  if (!touch.enabled) textC('ESC: RESUME   M: MUTE   F: FULLSCREEN', VW / 2, 130, COL.dim, 1);
+  textC(touch.enabled ? 'LASER COSTS ' + C.laser.cost + (C.laser.cost === 1 ? ' SEGMENT' : ' SEGMENTS') : 'SPACE: SHED    E: LASER (COSTS ' + C.laser.cost + (C.laser.cost === 1 ? ' SEGMENT)' : ' SEGMENTS)'), VW / 2, 142, COL.ui, 1);
+}
+function drawTouchUI() {
+  if (!touch.enabled || S !== 'play') return;
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  for (const b of [TB.shed, TB.laser]) {
+    const ready = b === TB.shed ? shedCd <= 0 : (laserCd <= 0 && segs.length > C.laser.cost);
+    box(b.x, b.y, 28, 28, ready ? '#2c3348' : '#1b2030', ready ? (b === TB.shed ? COL.head : '#6FF0FF') : COL.dark);
+    textC(b.label, b.x, b.y - 2, ready ? COL.ui : COL.dim, 1);
+  }
+  box(TB.pause.x, TB.pause.y, 12, 12, '#1b2030', COL.dim);
+  g.fillStyle = COL.ui; g.fillRect(TB.pause.x - 3, TB.pause.y - 3, 2, 6); g.fillRect(TB.pause.x + 1, TB.pause.y - 3, 2, 6);
+  if (touch.id !== null) { ring(touch.sx, touch.sy, 16, 'rgba(255,255,255,0.35)'); box(touch.sx + touch.ax * 12, touch.sy + touch.ay * 12, 5, 5, 'rgba(255,255,255,0.6)', 'rgba(0,0,0,0)'); }
+}
+/* ===================== HOW-TO-PLAY GUIDE (animated, beginner friendly) ===================== */
+let guidePage = 0, guideT = 0, guideFrom = 'title';
+const lerp = (a, b, t) => a + (b - a) * t;
+function gEnemy(x, y, flash) { box(x, y, 5, 5, flash ? '#FFFFFF' : COL.enemy); }
+function gKey(label, x, y, on, w) {
+  w = w || 11;
+  g.fillStyle = COL.dark; g.fillRect(x - 1, y - 1, w + 2, 13);
+  g.fillStyle = on ? COL.head : '#2c3348'; g.fillRect(x, y, w, 11);
+  text(label, x + (w - textW(label, 1)) / 2, y + 3, on ? COL.dark : COL.ui, 1, false);
+}
+function gHead(x, y, col) { box(x, y, 7, 7, col || COL.head); }
+function gFloat(s, x, y, col) { textC(s, x, y, col || COL.head, 1); }
+
+function demoSteer(t) {
+  const cx = 200, cy = 79, r = 26, a = t * 1.3;
+  g.fillStyle = '#2a3040';
+  for (let i = 0; i < 40; i++) g.fillRect(R(cx + Math.cos(i / 40 * TAU) * r), R(cy + Math.sin(i / 40 * TAU) * r), 1, 1);
+  for (let k = 9; k >= 1; k--) drawWeapon(k % 4 === 0 ? 'spike' : 'spitter', cx + Math.cos(a - k * 0.25) * r, cy + Math.sin(a - k * 0.25) * r);
+  gHead(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+  const dx = -Math.sin(a), dy = Math.cos(a);                // heading -> which key is "held"
+  gKey('W', 62, 58, dy < -0.4); gKey('A', 50, 71, dx < -0.4); gKey('S', 62, 71, dy > 0.4); gKey('D', 74, 71, dx > 0.4);
+  gFloat('HOLD A KEY TO TURN', 68, 92, COL.dim);
+}
+function demoGrow(t) {
+  t %= 6; const hx = 190, y = 79;
+  let eaten = 0;
+  for (let k = 0; k < C.snake.orbsPerSeg; k++) {
+    const te = 0.8 + k * 0.5;
+    if (t >= te) { eaten++; continue; }
+    const f = clamp((t - (te - 0.6)) / 0.6, 0, 1);
+    box(lerp(235 + k * 9, hx + 6, f), lerp(y + (k % 2 ? 12 : -12), y, f), 3, 3, COL.orb);
+  }
+  const grown = t >= 3.2;
+  for (let i = 0; i < 3 + (grown ? 1 : 0); i++) drawWeapon('spitter', hx - 8 * (i + 1), y);
+  gHead(hx, y);
+  if (grown && t < 3.7) ring(hx - 32, y, (t - 3.2) * 40, '#FFFFFF');
+  const shown = grown ? 0 : eaten;
+  for (let k = 0; k < C.snake.orbsPerSeg; k++) { g.fillStyle = COL.dark; g.fillRect(100 + k * 8, 52, 7, 6); g.fillStyle = k < shown ? COL.orb : '#2a3040'; g.fillRect(101 + k * 8, 53, 5, 4); }
+  text(C.snake.orbsPerSeg + ' ORBS', 100, 61, COL.dim, 1);
+  if (grown) gFloat('+1 SEGMENT!', hx - 32, 96, COL.head);
+}
+function demoSpitter(t) {
+  t %= 4.2; const sx = 110, y = 79;
+  ring(sx, y, 60, '#3a4152');
+  gFloat('RANGE', sx, y - 32, COL.dim);
+  drawWeapon('spitter', sx + 12, y); drawWeapon('spitter', sx, y); drawWeapon('spitter', sx - 12, y);
+  const ex = tt => 235 - 28 * tt;
+  const shots = [2.4, 3.0];
+  for (const s of shots) {
+    if (t >= s && t < s + 0.3) box(lerp(sx, ex(s + 0.3), (t - s) / 0.3), y, 2, 2, '#D9FF8A');
+  }
+  const hit = shots.some(s => t >= s + 0.3 && t < s + 0.42);
+  if (t < 3.45) gEnemy(ex(t), y, hit);
+  else if (t < 3.9) { g.fillStyle = COL.enemy; for (let i = 0; i < 6; i++) g.fillRect(R(ex(3.45) + Math.cos(i) * (t - 3.45) * 30), R(y + Math.sin(i * 2) * (t - 3.45) * 30), 1, 1); }
+  if (t >= 1.7 && t < 2.4) gFloat('IN RANGE: FIRE!', sx + 60, y - 22, COL.head);
+}
+function demoSpike(t) {
+  t %= 4.6; const y = 79, lead = 150;
+  drawWeapon('spitter', lead - 36, y); drawWeapon('spitter', lead - 24, y);
+  drawWeapon('spike', lead - 12, y); drawWeapon('spike', lead, y);
+  gHead(lead - 48, y);
+  const ex = Math.max(lead + 8, 250 - 45 * t), touching = ex <= lead + 8.1;
+  const hitT = k => 2.2 + k * 0.5;
+  if (t < 4.2) {
+    let fl = false;
+    for (let k = 0; k < 4; k++) if (touching && t >= hitT(k) && t < hitT(k) + 0.1) fl = true;
+    gEnemy(ex, y, fl);
+    for (let k = 0; k < 4; k++) if (t >= hitT(k) && t < hitT(k) + 0.45) gFloat('-1', ex + 4, y - 10 - (t - hitT(k)) * 25, COL.head);
+  }
+  if (t >= 2.2) gFloat('ONCE EVERY 0.5S', 215, y + 22, COL.dim);
+}
+function demoFusion(t) {
+  t %= 5;
+  const y = 79;
+  text('3 SPIKES', 24, y - 2, COL.ui, 1);
+  const p = clamp(t / 1.1, 0, 1), e = p * p * (3 - 2 * p);
+  if (t < 1.3) { for (let i = 0; i < 3; i++) drawWeapon('spike', lerp(120 + i * 22, 142, e), y); }
+  else {
+    drawWeapon('mace', 142, y);
+    if (t < 1.7) ring(142, y, (t - 1.3) * 60, '#FFFFFF');
+    text('MACE', 130, y + 9, WEAPONS.mace.color, 1);
+    gEnemy(160, y, t > 1.8 && (t % 0.5) < 0.1);
+    if (t > 1.8) gFloat('-2', 172, y - 10, COL.head);
+    gFloat('FREES 2 SLOTS', 230, y + 22, COL.dim);
+  }
+  gFloat('SPITTERS DO NOT FUSE', 240, 52, COL.dim);
+}
+function demoLaser(t) {
+  t %= 5; const y = 79, hx = 150, fire = 1.4;
+  for (let i = 0; i < 6; i++) {
+    if (t >= fire && i >= 4) continue;
+    drawWeapon(i % 2 ? 'spike' : 'spitter', hx - 8 * (i + 1), y);
+  }
+  if (t >= fire && t < fire + 0.5) {
+    g.fillStyle = '#6FF0FF';
+    for (let i = 0; i < 12; i++) { const a = i * 0.9, d = (t - fire) * 60; g.fillRect(R(hx - 40 + Math.cos(a) * d), R(y + Math.sin(a) * d), 1, 1); }
+  }
+  gHead(hx, y);
+  const xs = [190, 212, 234, 256, 278];
+  for (const x of xs) if (t < fire + 0.35) gEnemy(x, y + ((x / 22) | 0) % 3 * 3 - 3, t >= fire && t < fire + 0.35);
+  if (t >= fire && t < fire + 0.25) {
+    const w = R(9 * (1 - (t - fire) / 0.25)) + 2;
+    g.fillStyle = '#6FF0FF'; g.fillRect(hx + 5, y - (w >> 1), 150, w);
+    g.fillStyle = '#FFFFFF'; g.fillRect(hx + 5, y - 1, 150, 3);
+  }
+  gKey('E', 30, 58, t >= fire && t < fire + 0.3);
+  if (t >= fire) gFloat('-2 SEGMENTS', 70, 96, '#6FF0FF');
+  gFloat('KEEP AT LEAST 1', 70, 106, COL.dim);
+  if (t < fire) gFloat('AIM WITH YOUR HEAD', 100, 52, COL.dim);
+}
+function demoShed(t) {
+  t %= 5.5; const ts = 1.5, ex = ts + 1.0;
+  const hxf = tt => 110 + tt * 16, y = 79;
+  const types = ['spitter', 'spitter', 'spike', 'spike', 'spitter', 'spike'];
+  const hx = hxf(t);
+  gHead(hx, y);
+  for (let i = 0; i < 6; i++) {
+    const dropped = t >= ts && i >= 4;
+    if (!dropped) drawWeapon(types[i], hx - 8 * (i + 1), y);
+    else if (t < ex) drawWeapon(types[i], hxf(ts) - 8 * (i + 1), y, (((t - ts) * 14) | 0) % 2 ? COL.orange : '#FFFFFF');
+  }
+  const fx = hxf(ts) - 8 * 5;
+  if (t < ex) { gEnemy(fx - 8, y - 10, false); gEnemy(fx + 6, y + 10, false); gEnemy(fx - 14, y + 8, false); }
+  if (t >= ex && t < ex + 0.35) { ring(fx, y, (t - ex) / 0.35 * 22, '#FFF3B0'); ring(fx, y, (t - ex) / 0.35 * 14, '#FFFFFF'); }
+  gKey('SPACE', 24, 58, t >= ts && t < ts + 0.3, 29);
+  const frac = t >= ts ? clamp((t - ts) / 3, 0, 1) : 1;
+  text('COOLDOWN', 24, 74, COL.dim, 1);
+  g.fillStyle = COL.dark; g.fillRect(23, 82, 32, 6); g.fillStyle = '#2a3040'; g.fillRect(24, 83, 30, 4); g.fillStyle = COL.orange; g.fillRect(24, 83, R(30 * frac), 4);
+  if (t >= ts && t < ex) gFloat('BOOM IN 1S', fx, y - 26, COL.orange);
+}
+function demoDanger(t) {
+  t %= 4;
+  const hx = 120, y = 79, hitT = 1.9;
+  const blink = t > hitT && t < hitT + 0.5 && ((t * 16) | 0) % 2 === 0;
+  for (let i = 0; i < 3; i++) if (!(t > hitT && i === 2)) drawWeapon('spitter', hx - 8 * (i + 1), y);
+  const orange = t > hitT && t < hitT + 0.2;
+  if (!blink) gHead(hx, y, orange ? COL.orange : COL.head);
+  const ex = 215 - 38 * t;
+  if (t < hitT) gEnemy(ex, y, false);
+  else if (t < hitT + 0.3) ring(hx + 4, y, (t - hitT) * 70, COL.orange);
+  if (t > hitT) gFloat('-1 SEGMENT', hx - 10, y + 22, COL.orange);
+  text('ENEMY BITE', 70, 46, COL.orange, 1);
+  const cx = 245, cy = 82, rr = 14;
+  for (let k = 9; k >= 1; k--) { const a = -k * 0.66; drawWeapon('spitter', cx + Math.cos(a) * rr, cy + Math.sin(a) * rr); }
+  gHead(cx + rr, cy, '#8FB8FF');
+  const sa = t * 12;
+  g.fillStyle = '#FFFFFF'; for (let i = 0; i < 3; i++) g.fillRect(R(cx + rr + Math.cos(sa + i * 2.1) * 9), R(cy - 10 + Math.sin(sa + i * 2.1) * 2), 1, 1);
+  text('SELF BITE', 215, 46, '#8FB8FF', 1);
+  gFloat('NO STEERING BRIEFLY', cx, 106, COL.dim);
+}
+function demoCards(t) {
+  const on = ((t / 1.2) | 0) % 3;
+  const defs = [['spitter', 'SPITTER', 'SEGMENTS'], ['spike', 'SPIKE', 'SEGMENTS'], [null, '+1 SEGMENT', 'NOW']];
+  for (let i = 0; i < 3; i++) {
+    const x = 40 + i * 85, y = 46, sel = on === i;
+    g.fillStyle = sel ? '#FFFFFF' : '#4a5268'; g.fillRect(x - 1, y - 1 - (sel ? 2 : 0), 72, 62 + (sel ? 2 : 0));
+    g.fillStyle = sel ? '#2c3348' : '#1f2433'; g.fillRect(x, y - (sel ? 2 : 0), 70, 60 + (sel ? 2 : 0));
+    const yy = y - (sel ? 2 : 0);
+    if (defs[i][0]) drawWeapon(defs[i][0], x + 35, yy + 16); else textC('+', x + 35, yy + 12, COL.head, 2);
+    textC(defs[i][1], x + 35, yy + 32, COL.ui, 1); textC(defs[i][2], x + 35, yy + 40, COL.ui, 1);
+    text(String(i + 1), x + 3, yy + 3, COL.dim, 1);
+  }
+  gFloat('PICK WITH 1 2 3, MOUSE, OR D-PAD + A', 160, 112, COL.dim);
+}
+function demoBoss(t) {
+  t %= 5.5; const y = 79, ax = 90, bx = 190;
+  const tele = t >= 1.4 && t < 2.4, landed = t >= 2.4;
+  if (landed) { g.fillStyle = COL.dark; g.fillRect(ax - 6, y - 6, 12, 12); g.fillStyle = COL.block; g.fillRect(ax - 5, y - 5, 10, 10); }
+  const px = landed ? bx : ax;
+  const flash = tele && ((t * 12) | 0) % 2 === 0;
+  box(px, y, 25, 25, flash ? COL.orange : COL.boss);
+  g.fillStyle = COL.dark; g.fillRect(R(px) - 7, R(y) - 5, 4, 4); g.fillRect(R(px) + 4, R(y) - 5, 4, 4);
+  if (tele) { ring(bx, y, 26, COL.orange); ring(bx, y, 26 * (1 - (t - 1.4)) + 2, '#FFFFFF'); }
+  if (landed && t < 2.7) ring(bx, y, (t - 2.4) * 80, COL.orange);
+  gHead(262, y + Math.sin(t * 2) * 5);
+  for (let i = 0; i < 4; i++) drawWeapon('spitter', 270 + i * 8 > 296 ? 296 : 270 + i * 8, y + 14 + i * 4);
+  if (tele) gFloat('ORANGE RING = LANDING SPOT', 160, 46, COL.orange);
+  else if (landed) gFloat('IT LEFT A WALL BEHIND', 160, 46, COL.dim);
+  else gFloat('BOSS WALKS, THEN BLINKS', 160, 46, COL.dim);
+}
+function demoRival(t) {
+  t %= 4.8; const y = 79, hx = 250 - 28 * Math.min(t, 3.4);
+  gHead(96, y); for (let i = 0; i < 5; i++) drawWeapon(i % 2 ? 'spike' : 'spitter', 88 - 8 * i, y);
+  const shots = [1.4, 1.9, 2.4, 2.9];
+  const hit = shots.some(s => t >= s + 0.3 && t < s + 0.4);
+  if (t < 3.4) {
+    for (let i = 7; i >= 0; i--) {
+      const yy = y + Math.sin(t * 4 - i * 0.7) * 7, xx = hx + i * 7;
+      box(xx, yy, i ? 5 : 7, i ? 5 : 7, hit ? '#FFFFFF' : i ? COL.rival : COL.rivalHead);
+    }
+    g.fillStyle = COL.dark; g.fillRect(R(hx) - 20, y - 25, 42, 5);
+    g.fillStyle = '#3a2a2e'; g.fillRect(R(hx) - 19, y - 24, 40, 3);
+    g.fillStyle = '#C8505F'; g.fillRect(R(hx) - 19, y - 24, R(40 * clamp(1 - (shots.filter(s => t >= s + 0.3).length) / 4, 0, 1)), 3);
+    for (const s of shots) if (t >= s && t < s + 0.3) box(lerp(96, 250 - 28 * (s + 0.3), (t - s) / 0.3), y, 2, 2, '#D9FF8A');
+  } else {
+    for (let i = 0; i < 8; i++) box(hx + i * 7, y + Math.sin(i) * 6, 3, 3, COL.orb);
+    gFloat('LOTS OF ORBS!', hx + 24, y - 20, COL.head);
+  }
+  gFloat('TOUCH IT: -1 SEGMENT (HEAD: -2)', 160, 46, COL.orange);
+  if (t < 3.4) gFloat('RIVAL SNAKE', hx, y + 20, COL.rivalHead);
+}
+const GUIDE = [
+  { title: 'STEERING', demo: demoSteer, lines: ['WASD, ARROWS OR LEFT STICK STEER THE HEAD.', 'IT TURNS AT A FIXED RATE, SO A LONG BODY', 'CANNOT TURN ON THE SPOT. PLAN YOUR CURVES.'] },
+  { title: 'EAT AND GROW', demo: demoGrow, lines: ['KILL ENEMIES TO DROP CYAN ORBS. WALK OVER THEM.', () => 'EVERY ' + C.snake.orbsPerSeg + ' ORBS ADDS A SEGMENT. NO LIMIT!', 'MORE SEGMENTS = MORE WEAPONS, BUT HARDER TO STEER.'] },
+  { title: 'SPITTER', demo: demoSpitter, lines: ['LIME SQUARE. SHOOTS A BOLT AT THE NEAREST', 'ENEMY INSIDE ITS RANGE RING.', 'SLOW FIRE, SHORT-LIVED BOLTS.'] },
+  { title: 'SPIKE', demo: demoSpike, lines: ['AMBER DIAMOND. HURTS ANY ENEMY TOUCHING IT,', 'AT MOST ONCE EVERY HALF SECOND PER ENEMY.', 'GREAT WHEN THE SWARM CLOSES IN.'] },
+  { title: 'FUSION', demo: demoFusion, lines: ['THREE SPIKES IN A ROW AT THE TAIL MERGE INTO A MACE.', 'THE MACE HITS TWICE AS HARD AND FREES 2 SLOTS.', 'MIX SPITTERS AND SPIKES TO CONTROL WHEN YOU FUSE.'] },
+  { title: 'LASER (ACTIVE)', demo: demoLaser, lines: [() => 'PRESS E OR X: SACRIFICE THE LAST ' + C.laser.cost + ' SEGMENTS.', 'A HUGE BEAM PIERCES EVERY ENEMY IN FRONT OF THE HEAD.', 'YOU KEEP AT LEAST 1 SEGMENT. GREAT IN AN EMERGENCY.'] },
+  { title: 'SHED', demo: demoShed, lines: ['PRESS SPACE OR A TO DROP THE LAST THIRD OF YOUR BODY.', 'THE PIECES FLASH, THEN EXPLODE AFTER 1 SECOND.', 'COOLDOWN 3 SECONDS. GOOD FOR ESCAPING A CROWD.'] },
+  { title: 'RIVAL SNAKES', demo: demoRival, lines: ['RED RIVAL SNAKES HUNT YOUR HEAD. THEY ARE SLOWER AND', 'TURN WIDER THAN YOU, SO YOU CAN OUT-MANOEUVRE THEM.', 'TOUCH ONE: LOSE 1 SEGMENT (ITS HEAD: 2). KILL IT FOR ORBS.'] },
+  { title: 'DANGERS', demo: demoDanger, lines: ['AN ENEMY TOUCHING YOUR HEAD COSTS A TAIL SEGMENT.', 'BITING YOUR OWN BODY LOCKS YOUR STEERING BRIEFLY.', 'NO SEGMENTS LEFT = RUN OVER. THE ORANGE ARENA EDGE KILLS!'] },
+  { title: 'LEVEL UPS', demo: demoCards, lines: [() => 'EVERY ' + C.xp.cardEvery + ' LEVELS YOU PICK 1 OF 3 CARDS.', 'SPITTER / SPIKE CARDS SET THE TYPE OF NEW SEGMENTS.', 'OTHER LEVELS SHOW A QUICK TIP. CARDS EXPLAIN THEMSELVES.'] },
+  { title: 'THE BOSS', demo: demoBoss, lines: [() => 'AT ' + fmt(C.boss.time) + ' A MINI-BOSS APPEARS. KILL IT TO WIN THE RUN.', 'IT TELEPORTS NEAR YOU: AN ORANGE RING MARKS THE LANDING.', 'DEFEAT: IT TOUCHES YOUR HEAD, ITS LANDING HITS YOU, OR YOU TOUCH A WALL.'] }
+];
+function openGuide(from) { guideFrom = from; guidePage = 0; guideT = 0; S = 'guide'; }
+function guideStep(d) {
+  const n = guidePage + d;
+  if (n < 0) return;
+  if (n >= GUIDE.length) { S = guideFrom; return; }
+  guidePage = n; guideT = 0;
+}
+function updateGuide(dt) {
+  guideT += dt;
+  if (took('ArrowRight') || took('KeyD') || took('PadRight') || took('Space') || took('Enter') || took('PadA')) guideStep(1);
+  if (took('ArrowLeft') || took('KeyA') || took('PadLeft')) guideStep(-1);
+  if (clicked) guideStep(clicked.x < VW / 3 ? -1 : 1);
+  if (took('Escape') || took('Backspace') || took('KeyH') || took('PadB') || took('PadStart') || took('PadY')) S = guideFrom;
+}
+function drawGuide() {
+  drawFloor(AW / 2, AH / 2); dim(0.55);
+  const pg = GUIDE[guidePage];
+  textC('HOW TO PLAY  ' + (guidePage + 1) + '/' + GUIDE.length, VW / 2, 5, COL.dim, 1);
+  textC(pg.title, VW / 2, 15, COL.head, 2);
+  g.fillStyle = COL.dark; g.fillRect(15, 33, 290, 90);
+  g.fillStyle = '#1b2030'; g.fillRect(16, 34, 288, 88);
+  g.save(); g.beginPath(); g.rect(16, 34, 288, 88); g.clip();
+  pg.demo(guideT);
+  g.restore();
+  for (let k = 0; k < pg.lines.length; k++) { const l = pg.lines[k]; textC(typeof l === 'function' ? l() : l, VW / 2, 128 + k * 8, k === 0 ? COL.ui : COL.dim, 1); }
+  for (let i = 0; i < GUIDE.length; i++) { g.fillStyle = i === guidePage ? COL.head : '#3a4152'; g.fillRect(VW / 2 - GUIDE.length * 4 + i * 8, 156, 5, 3); }
+  textC('< > PAGE      ESC OR H: BACK', VW / 2, 168, COL.dim, 1);
+}
+
+/* ===================== AUTOPILOT (press B: watch a bot play) ===================== */
+// A potential-field bot: sums "forces" from every hazard/attraction, steers along the result, and uses
+// shed / laser / cards on its own. It only ever produces a steering vector + ability presses, exactly
+// like a player would, so it's a fair test of difficulty.
+let autopilot = false, apTick = 0, cardWait = 0;
+const ap = { x: 1, y: 0 };
+const CARD_PREF = ['turn', 'seg', 'spike', 'spitter', 'orb', 'speed'];
+function autopilotThink() {
+  apTick++;
+  const hx = head.x, hy = head.y, dirx = Math.cos(head.ang), diry = Math.sin(head.ang);
+  let fx = dirx * 0.4, fy = diry * 0.4;                    // mild forward bias => less jitter
+  const push = (ex, ey, rad2, w) => {                      // repel from a point inside radius rad2
+    const dx = hx - ex, dy = hy - ey, d = Math.hypot(dx, dy) || 1;
+    if (d < rad2) { const k = (rad2 - d) / rad2 * w; fx += dx / d * k; fy += dy / d * k; }
+  };
+  // arena edge (deadly): soft margin + look-ahead pull to the centre
+  const mg = 80;
+  if (hx < mg) fx += (mg - hx) / mg * 4; if (hx > AW - mg) fx -= (hx - (AW - mg)) / mg * 4;
+  if (hy < mg) fy += (mg - hy) / mg * 4; if (hy > AH - mg) fy -= (hy - (AH - mg)) / mg * 4;
+  const px = hx + dirx * 45, py = hy + diry * 45;
+  if (px < 14 || px > AW - 14 || py < 14 || py > AH - 14) {
+    const cx = AW / 2 - hx, cy = AH / 2 - hy, cd = Math.hypot(cx, cy) || 1; fx += cx / cd * 5; fy += cy / cd * 5;
+  }
+  // enemies
+  let nearThreat = 0;
+  for (let i = 0; i < MAXE; i++) {
+    const e = enemies[i];
+    if (!e.active) continue;
+    if (e.boss) {
+      const dx = hx - e.x, dy = hy - e.y, d = Math.hypot(dx, dy) || 1;
+      if (d < 50) { const k = (50 - d) / 50 * 6; fx += dx / d * k; fy += dy / d * k; nearThreat += k; }
+      else if (d > 70) { fx -= dx / d * 0.8; fy -= dy / d * 0.8; }             // stay in weapon range
+      else { fx += -dy / d * 0.9; fy += dx / d * 0.9; }                          // circle the boss
+      if (e.tele > 0) push(e.tx, e.ty, C.boss.slamRadius + 45, 8);               // keep clear of the landing ring
+    } else if (e.owner >= 0) push(e.x, e.y, e.seg === 0 ? 70 : 38, e.seg === 0 ? 3 : 1.5);
+    else push(e.x, e.y, 34, 0.9);
+  }
+  for (const b of blocks) {                                // boss walls are lethal: repel the head AND a look-ahead point
+    const bx = b.x + b.s / 2, by = b.y + b.s / 2;
+    push(bx, by, 46, 7);
+    const lx = hx + dirx * 22, ly = hy + diry * 22, ddx = lx - bx, ddy = ly - by, dd = Math.hypot(ddx, ddy) || 1;
+    if (dd < 30) { fx += ddx / dd * 9; fy += ddy / dd * 9; }
+  }
+  // own body: don't turn into it
+  for (let i = C.snake.selfSkip; i < segs.length; i += 1) {
+    const s = segs[i], dx = s.x - hx, dy = s.y - hy;
+    if (dx * dx + dy * dy < 24 * 24 && dx * dirx + dy * diry > -4) push(s.x, s.y, 24, 2.5);
+  }
+  // orbs: nearest within reach
+  let bo = null, bd = 120 * 120;
+  for (const o of orbs) { if (!o.active) continue; const dx = o.x - hx, dy = o.y - hy, d = dx * dx + dy * dy; if (d < bd) { bd = d; bo = o; } }
+  if (bo) { const dx = bo.x - hx, dy = bo.y - hy, d = Math.hypot(dx, dy) || 1; fx += dx / d * 1.3; fy += dy / d * 1.3; }
+  // gentle pull toward the middle so it doesn't hug walls
+  fx += (AW / 2 - hx) / AW * 0.6; fy += (AH / 2 - hy) / AH * 0.6;
+  const m = Math.hypot(fx, fy) || 1; ap.x = fx / m; ap.y = fy / m;
+
+  // abilities (checked a few times per second)
+  if (apTick % 5 === 0) {
+    if (laserCd <= 0 && segs.length > C.laser.cost + 4) {
+      let c = 0;
+      for (let i = 0; i < MAXE; i++) {
+        const e = enemies[i];
+        if (!e.active) continue;
+        const dx = e.x - hx, dy = e.y - hy, along = dx * dirx + dy * diry;
+        if (along > 0 && along < C.laser.length && Math.abs(-dx * diry + dy * dirx) < C.laser.width / 2 + e.r) c += e.boss ? 8 : 1;
+      }
+      if (c >= 6) doLaser();
+    }
+    if (shedCd <= 0 && segs.length >= 9) {
+      const third = Math.floor(segs.length / 3); let c = 0;
+      for (let i = 0; i < MAXE; i++) {
+        const e = enemies[i];
+        if (!e.active || e.owner >= 0 && false) continue;
+        for (let k = segs.length - third; k < segs.length; k += 2) {
+          const dx = e.x - segs[k].x, dy = e.y - segs[k].y;
+          if (dx * dx + dy * dy < 26 * 26) { c++; break; }
+        }
+      }
+      if (c >= 6) doShed();
+    }
+  }
+}
+function autopilotPickCard() {
+  for (const id of CARD_PREF) { const i = cardChoices.findIndex(c => c.id === id); if (i >= 0) return i; }
+  return 0;
+}
+
+function drawDebug() {
+  const lines = ['FPS ' + Math.round(fps), 'ENEMIES ' + activeEnemies, 'SEGMENTS ' + segs.length,
+    'BOLTS ' + bolts.filter(b => b.active).length, 'ORBS ' + orbs.filter(o => o.active).length];
+  for (let i = 0; i < lines.length; i++) text(lines[i], 4, 42 + i * 7, '#FFFF66', 1);
+}
+const isPortrait = () => touch.enabled && innerHeight > innerWidth * 1.15;
+function render() {
+  if (S === 'title') drawTitle();
+  else if (S === 'guide') drawGuide();
+  else {
+    drawWorld();
+    drawHUD();
+    drawTouchUI();
+    if (S === 'paused') drawPause();
+    else if (S === 'levelup') drawCards();
+    else if (S === 'win' || S === 'lose') drawEnd();
+  }
+  if (toastT > 0) textC(toastMsg, VW / 2, 34, COL.head, 1);
+  if (isPortrait()) {                                    // phone held upright: ask for landscape
+    g.setTransform(1, 0, 0, 1, 0, 0); dim(0.92);
+    textC('PLEASE ROTATE YOUR PHONE', VW / 2, 74, COL.head, 1);
+    textC('THE GAME PLAYS IN LANDSCAPE', VW / 2, 86, COL.dim, 1);
+  }
+  if (debug) drawDebug();
+  // present: whole-number upscale, nearest-neighbour, centred with letterbox bars
+  sctx.imageSmoothingEnabled = false;
+  sctx.fillStyle = '#000'; sctx.fillRect(0, 0, screen.width, screen.height);
+  sctx.drawImage(buf, 0, 0, VW, VH, offX, offY, VW * scale, VH * scale);
+}
+
+/* ===================== GAME LOOP ===================== */
+let last = performance.now(), acc = 0;
+function frame(now) {
+  requestAnimationFrame(frame);
+  let dt = (now - last) / 1000; last = now;
+  if (dt > 0.25) dt = 0.25;                                // avoid spiral of death after tab switch
+  if (dt > 0) fps += (1 / dt - fps) * 0.1;
+  acc += dt;
+  pollPad();
+  if (!AUD.ctx) for (const k in pressed) if (pressed[k]) { audioInit(); break; }
+  if (isPortrait()) pauseGame();
+  musicDirector(); musicPump();
+  let ran = false;
+  while (acc >= TICK) { update(TICK); acc -= TICK; ran = true; }   // fixed 60 Hz simulation
+  if (ran) { for (const k in pressed) pressed[k] = false; clicked = null; }
+  render();
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
