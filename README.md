@@ -31,7 +31,7 @@ Open SELECT MODE on the title screen to see every mode with its rules and your b
 | Boss Rush | Start with 14 segments, boss at 1:00 with less health. |
 | Endless | No boss; the swarm keeps ramping. Survival time adds to your score. |
 | Laser Duel | Two bosses from the first seconds, no swarm and no rivals. The laser is free (no segments lost) with a 1.4 s cooldown. Kill both to win; faster wins score more. |
-| Rival Hunt | No swarm, no boss, no Spitters or Spikes and no shed. Hunt 5 armoured rival snakes: only the laser (costs 1 segment) hurts them, and they eat the orbs that rain on the arena and grow longer. One of them is an orange BRUTE: slow, huge, tough, never dodges, counts as 2 kills. |
+| Rival Hunt | No swarm, no boss, no Spitters or Spikes and no shed. Hunt 5 armoured, deadly rival snakes (touch one and you die): only the laser (costs 1 segment) hurts them, and they eat the orbs that rain on the arena and grow longer. One of them is an orange BRUTE: slow, huge, tough, never dodges, counts as 2 kills. |
 | Hard | Tougher swarm, rivals from 0:12, a faster and tougher boss. |
 
 Modes are CONFIG overrides: add an entry to the `MODES` array near the top of the script.
@@ -51,6 +51,7 @@ New ideas live on the `experiments` branch (cone laser, boss health bar, laser-o
 
 The APK is a minimal Android WebView app (`MainActivity.java` + manifest) with `index.html` bundled as an asset.
 Build tools are not included in this repo.
+
 
 
 

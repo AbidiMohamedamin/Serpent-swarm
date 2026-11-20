@@ -78,6 +78,7 @@ const CONFIG = {
     first: 15, every: 14, max: 4,               // first spawn (s), spawn interval (s), max alive (also capped by 1 + runTime/40)
     bruteSpeed: 34, bruteTurn: 65, bruteHp: 2.0, bruteSpacing: 9, bruteHeadR: 8, bruteBodyR: 6, bruteHeadDamage: 3, bruteKills: 2, bruteBonusOrbs: 6,   // the BRUTE rival: slow, huge, tough, never dodges; counts as 2 kills
     sepGap: 14, sepForce: 2.5, spawnGap: 130,       // rivals keep apart: steering avoidance range/strength, and minimum spawn distance from other rivals (px)
+    lethal: false,                                  // true: your head touching ANY rival segment is instant defeat (Rival Hunt)
     eats: false, laserOnly: false,                   // Rival Hunt rules: rivals eat orbs and grow; only the laser hurts them
     eatR: 7, eatChase: 60, eatCap: 40, eatPerSeg: 3, maxLen: 20, growHp: 6,   // eating: radius, orb-chase range, orbs remembered, orbs per new segment, max length, hp per new segment
     len: 8, hp: 24, speed: 52, turnRate: 95,    // slower and clumsier than you, so they can be out-turned
@@ -101,7 +102,7 @@ const MODES = [
   { id: 'rush',    name: 'BOSS RUSH', desc: 'START LONG. BOSS IN 1:00. FAST AND BRUTAL', set: { boss: { time: 60, hp: 150 }, snake: { startSegs: 14 }, rival: { first: 999 } } },
   { id: 'endless', name: 'ENDLESS',   desc: 'NO BOSS. THE SWARM NEVER STOPS GROWING', set: { run: { boss: false, rampTime: 240 }, enemy: { rampTo: 3.5 } } },
   { id: 'duel',    name: 'LASER DUEL', desc: 'INFINITE LASER. NO SWARM. KILL BOTH BOSSES', set: { run: { boss: true, bosses: 2, swarm: false, laserFree: true }, boss: { time: 2, hp: 130, teleportEvery: 4.5, blockEvery: 2.6, blockLife: 8 }, laser: { cooldown: 1.4, damage: 14 }, rival: { first: 1e9 }, snake: { startSegs: 6 } } },
-  { id: 'hunt',    name: 'RIVAL HUNT', desc: 'HUNT 5 RIVALS (THE BRUTE COUNTS 2). LASER ONLY', set: { run: { weapons: false, shed: false, bruteRivals: 1, boss: false, swarm: false, rampTime: 150, rivalKills: 5, rivalCap: 3, orbEvery: 0.7, orbCap: 45 }, rival: { first: 3, every: 6, hp: 16, speed: 55, eats: true, laserOnly: true, eatPerSeg: 2, turnRate: 105 }, laser: { cost: 1, width: 14, cooldown: 0.8 }, snake: { startSegs: 8 } } },
+  { id: 'hunt',    name: 'RIVAL HUNT', desc: 'HUNT 5 DEADLY RIVALS (BRUTE = 2). LASER ONLY', set: { run: { weapons: false, shed: false, bruteRivals: 1, boss: false, swarm: false, rampTime: 150, rivalKills: 5, rivalCap: 3, orbEvery: 0.7, orbCap: 45 }, rival: { first: 3, every: 6, hp: 16, speed: 55, eats: true, laserOnly: true, lethal: true, eatPerSeg: 2, turnRate: 105 }, laser: { cost: 1, width: 14, cooldown: 0.8 }, snake: { startSegs: 8 } } },
   { id: 'hard',    name: 'HARD',      desc: 'TOUGHER SWARM, EARLY RIVALS, ANGRY BOSS', set: { enemy: { spawnBase: 2.8, hpPerMinute: 0.45 }, rival: { first: 12, every: 11 }, boss: { hp: 170, teleportEvery: 2.6 }, orb: { dropChance: 0.85 } } },
 ];
 let modeIdx = 0, bossList = [], rivalKills = 0, orbT = 0, rivalSpawned = 0, rivalMsg = '';
@@ -992,6 +993,7 @@ function headCollisions() {
     const rr = e.r + hr, dx = e.x - head.x, dy = e.y - head.y;
     if (dx * dx + dy * dy >= rr * rr) continue;
     if (e.owner >= 0) {                                  // touching a rival snake: lose segments, it recoils
+      if (C.rival.lethal) { killHead(e.seg === 0 ? 'A RIVAL SNAKE CRUSHED YOU' : 'YOU TOUCHED A RIVAL SNAKE'); return; }   // Rival Hunt: instant defeat
       if (head.invuln <= 0) { rivals[e.owner].recoil = C.rival.recoil; hurtHead(e.seg === 0 ? (rivals[e.owner].brute ? C.rival.bruteHeadDamage : C.rival.headDamage) : C.rival.bodyDamage); if (segs.length === 0) deathMsg = 'A RIVAL SNAKE GOT YOU'; }
       if (S !== 'play') return;
       continue;
@@ -1064,7 +1066,7 @@ function showTip() {
   do { idx = tipIdx++ % TIPS.length; } while (guard++ < 12 && ((!C.run.weapons && (idx === 1 || idx === 4 || idx === 6)) || (!C.run.shed && idx === 3) || (!C.run.boss && idx === 7)));
   tipLines = TIPS[idx];
   if (idx === 2 && C.laser.cost !== 2) tipLines = ['PRESS E (OR X) TO SACRIFICE ' + C.laser.cost + ' SEGMENT FOR A HUGE', 'PIERCING LASER IN THE DIRECTION YOU FACE.'];
-  if (C.rival.laserOnly && tipLines === TIPS[0]) tipLines = ['RIVALS ARE ARMOURED: ONLY THE LASER (E) HURTS THEM.', 'THEY EAT ORBS AND GROW. KILL ' + C.run.rivalKills + ' TO WIN.']; tipT = 7; lvlBannerT = 1.5; }
+  if (C.rival.laserOnly && tipLines === TIPS[0]) tipLines = ['RIVALS ARE ARMOURED AND DEADLY: TOUCH ONE AND YOU DIE.', 'ONLY THE LASER (E) HURTS THEM. KILL ' + C.run.rivalKills + ' TO WIN.']; tipT = 7; lvlBannerT = 1.5; }
 function updateOrbs(dt) {
   const m2 = C.orb.magnet * C.orb.magnet, p2 = C.orb.pickR * C.orb.pickR;
   for (let i = 0; i < orbs.length; i++) {
@@ -1589,7 +1591,7 @@ function drawHUD() {
     text('TIP', 22, 124, COL.orb, 1);
     for (let k = 0; k < tipLines.length; k++) text(tipLines[k], 22, 133 + k * 8, COL.ui, 1);
   }
-  if (rivalBannerT > 0 && ((rivalBannerT * 6) | 0) % 2 === 0) textC(rivalMsg || (C.rival.laserOnly ? 'ARMOURED RIVAL! FIRE THE LASER (E)!' : 'RIVAL SNAKE HUNTING YOU!'), VW / 2, 56, rivalMsg ? COL.bruteHead : COL.rivalHead, 1);
+  if (rivalBannerT > 0 && ((rivalBannerT * 6) | 0) % 2 === 0) textC(rivalMsg || (C.rival.laserOnly ? 'DEADLY RIVAL! FIRE THE LASER (E)!' : 'RIVAL SNAKE HUNTING YOU!'), VW / 2, 56, rivalMsg ? COL.bruteHead : COL.rivalHead, 1);
   if (bannerT > 0 && ((bannerT * 6) | 0) % 2 === 0) textC(C.run.bosses > 1 ? 'TWO BOSSES! SURVIVE AND FIRE THE LASER!' : 'THE MINI-BOSS APPROACHES!', VW / 2, 20, COL.orange, 1);
 }
 function dim(a) { g.fillStyle = 'rgba(8,10,16,' + a + ')'; g.fillRect(0, 0, VW, VH); }
